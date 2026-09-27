@@ -6,7 +6,7 @@
 #
 # Base images are pinned by digest (tag kept for readability); bump both together.
 
-FROM rust:1.94.1-bookworm@sha256:6ae102bdbf528294bc79ad6e1fae682f6f7c2a6e6621506ba959f9685b308a55 AS build
+FROM rust:1.98.1-bookworm@sha256:93ce27a88655056a51dbdd8f5f2d7ddc071c7b0070fb288a37b5a285fc83971e AS build
 # The image's toolchain is the one rust-toolchain.toml pins; naming it
 # explicitly stops rustup from downloading extra components during the build.
 ENV RUSTUP_TOOLCHAIN=1.94.1 \
