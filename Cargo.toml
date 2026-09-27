@@ -1,0 +1,26 @@
+[workspace]
+resolver = "2"
+members = [
+  "crates/netpolicy",
+  "crates/host-agent",
+  "crates/guest-init",
+]
+
+[workspace.package]
+version = "0.1.0"
+edition = "2021"
+license = "FSL-1.1-ALv2"
+repository = "https://github.com/weftsh/byoc"
+rust-version = "1.85"
+
+[workspace.lints.rust]
+unsafe_code = "deny"
+
+[workspace.lints.clippy]
+all = { level = "warn", priority = -1 }
+
+[profile.release]
+lto = "thin"
+codegen-units = 1
+strip = "symbols"
+panic = "abort"

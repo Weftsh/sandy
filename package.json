@@ -1,0 +1,17 @@
+{
+  "name": "weft-sandboxes",
+  "private": true,
+  "description": "Weft Sandboxes: self-hosted, E2B-SDK-compatible Firecracker sandboxes that run entirely inside your AWS account.",
+  "license": "SEE LICENSE IN LICENSE.md",
+  "packageManager": "pnpm@10.33.0",
+  "engines": {
+    "node": ">=22"
+  },
+  "scripts": {
+    "build": "pnpm -r run build",
+    "typecheck": "pnpm -r run typecheck",
+    "test": "pnpm -r --filter '!@weftsh/compat-tests' run test",
+    "lint": "pnpm -r run lint",
+    "compat": "pnpm --filter @weftsh/compat-tests run test"
+  }
+}

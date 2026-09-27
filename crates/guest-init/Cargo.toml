@@ -1,0 +1,15 @@
+[package]
+name = "weft-guest-init"
+description = "PID 1 for Weft sandboxes: mounts, hostname, resolver and envd supervision"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+repository.workspace = true
+rust-version.workspace = true
+
+[dependencies]
+nix = { version = "0.31", features = ["mount", "hostname", "reboot", "signal", "process", "fs", "resource"] }
+signal-hook = "0.4"
+
+[lints]
+workspace = true

@@ -1,0 +1,25 @@
+Weft Sandboxes
+Copyright 2026 Weft
+
+This product includes or redistributes the following third-party software.
+
+--------------------------------------------------------------------------
+envd (in-guest agent)
+Copyright 2023 FoundryLabs, Inc.
+Licensed under the Apache License, Version 2.0.
+Source: https://github.com/e2b-dev/infra/tree/main/packages/envd
+Weft Sandboxes builds envd from unmodified upstream source at a pinned
+revision (see guest/envd/VERSION) and places the binary in sandbox root
+filesystems.
+
+--------------------------------------------------------------------------
+Firecracker and jailer
+Copyright Amazon.com, Inc. or its affiliates.
+Licensed under the Apache License, Version 2.0.
+Source: https://github.com/firecracker-microvm/firecracker
+Host AMIs ship unmodified upstream release binaries.
+
+--------------------------------------------------------------------------
+"E2B" is a trademark of its owner. Weft Sandboxes is an independent project,
+is not affiliated with or endorsed by E2B, and uses the name only to describe
+compatibility with the open-source E2B SDKs.

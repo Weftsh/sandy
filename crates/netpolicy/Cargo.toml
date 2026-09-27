@@ -1,0 +1,19 @@
+[package]
+name = "weft-netpolicy"
+description = "Egress policy model and PROXY protocol v2 framing shared by the Weft host agent and egress gateway"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+repository.workspace = true
+rust-version.workspace = true
+
+[dependencies]
+ipnet = "2.12"
+serde = { version = "1", features = ["derive"] }
+thiserror = "2"
+
+[dev-dependencies]
+serde_json = "1"
+
+[lints]
+workspace = true

@@ -1,0 +1,6 @@
+# Pinned upstream revision of E2B's envd (Apache-2.0).
+# Module: github.com/e2b-dev/infra/packages/envd (with sibling packages/shared)
+# Commit: 132dadd2ef55bbac301528500e8a4538caf4b163 (2026-09-26), envd 0.9.0
+ENVD_MODULE_VERSION=v0.0.0-20260926143342-132dadd2ef55
+ENVD_VERSION=0.9.0
+ENVD_SHA256_AMD64=ac68f97ab3fba6236ac9d8e76ba86f8aa4fe1d8781582f2d14f38152abac547f

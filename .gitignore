@@ -1,0 +1,32 @@
+# Dependencies and build output
+node_modules/
+dist/
+target/
+*.tsbuildinfo
+coverage/
+.venv/
+__pycache__/
+*.pyc
+
+# Local runtime state
+.weft/
+/var/
+*.log
+
+# Secrets and local config: never commit these
+.env
+.env.*
+!.env.example
+*.pem
+*.key
+!**/testdata/**/*.pem
+*.p12
+*.pfx
+license.key
+admin-key.txt
+
+# Editors and OS
+.idea/
+.vscode/
+*.swp
+.DS_Store

@@ -1,0 +1,34 @@
+{
+  "name": "@weftsh/sandbox-license",
+  "version": "0.1.0",
+  "private": true,
+  "description": "License key verification, daily check and AWS License Manager support for Weft Sandboxes",
+  "license": "FSL-1.1-ALv2",
+  "type": "module",
+  "main": "dist/index.js",
+  "types": "dist/index.d.ts",
+  "exports": {
+    ".": {
+      "types": "./dist/index.d.ts",
+      "default": "./dist/index.js"
+    }
+  },
+  "bin": {
+    "weft-license": "dist/cli.js"
+  },
+  "files": ["dist"],
+  "scripts": {
+    "build": "tsc -p tsconfig.build.json",
+    "typecheck": "tsc -p tsconfig.json --noEmit",
+    "test": "vitest run"
+  },
+  "dependencies": {
+    "@aws-sdk/client-kms": "3.1141.0",
+    "@aws-sdk/client-license-manager": "3.1141.0"
+  },
+  "devDependencies": {
+    "@types/node": "^22.20.4",
+    "typescript": "~6.0.3",
+    "vitest": "^4.1.11"
+  }
+}
