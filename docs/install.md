@@ -69,7 +69,7 @@ aws secretsmanager get-secret-value --secret-id <AdminKeySecretArn output> \
   --query SecretString --output text
 ```
 
-Use it with the `weft-sandbox` CLI (Node.js 20 or later):
+Use it with the `weft-sandbox` CLI (Node.js 22 or later):
 
 ```sh
 npm install -g @weftsh/sandbox

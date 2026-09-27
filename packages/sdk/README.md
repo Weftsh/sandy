@@ -11,6 +11,8 @@ templates.
 npm install @weftsh/sandbox e2b
 ```
 
+Requires Node.js 22 or later.
+
 ## Configure the E2B SDK
 
 ```ts

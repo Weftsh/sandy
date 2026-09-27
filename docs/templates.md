@@ -8,7 +8,7 @@ and envd while building it, so images need nothing Weft-specific.
 
 `Sandbox.create()` without a template name uses `base`. The stack builds it at
 first start from `ghcr.io/weftsh/sandbox-base:<version>`
-([templates/base](../templates/base)): Ubuntu 24.04 with Python 3, Node.js,
+([templates/base](../templates/base)): Ubuntu 24.04 with Python 3, Node.js 24 (LTS),
 git, build tools and a `user` account with passwordless sudo. The image is
 published and cosign-signed by `.github/workflows/base-template.yml`.
 
