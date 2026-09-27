@@ -26,6 +26,20 @@ ECHO_PORT=18443
 log() { printf '\033[1m[dev-stack]\033[0m %s\n' "$*" >&2; }
 die() { log "error: $*"; exit 1; }
 
+remove_host_rules() {
+  # The host agent's host-level chains match only sandbox interfaces (wv+),
+  # so they are inert once it stops; remove them so `down` leaves no rules.
+  while iptables -w -t nat -D PREROUTING -i wv+ -j WEFT-PRE 2>/dev/null; do :; done
+  while iptables -w -D INPUT -i wv+ -j WEFT-IN 2>/dev/null; do :; done
+  while iptables -w -D FORWARD -o wv+ -j WEFT-FWD 2>/dev/null; do :; done
+  while iptables -w -D FORWARD -i wv+ -j WEFT-FWD 2>/dev/null; do :; done
+  for chain in WEFT-IN WEFT-FWD; do
+    iptables -w -F "$chain" 2>/dev/null && iptables -w -X "$chain" 2>/dev/null
+  done
+  iptables -w -t nat -F WEFT-PRE 2>/dev/null && iptables -w -t nat -X WEFT-PRE 2>/dev/null
+  return 0
+}
+
 stop_all() {
   # The host agent first, so it can stop its sandboxes while the control
   # plane is still up; wait for each process to exit before going on.
@@ -214,7 +228,7 @@ up() {
 
 case "${1:-}" in
   up) shift; up "$@" ;;
-  down) stop_all; log "stopped" ;;
+  down) stop_all; remove_host_rules; log "stopped" ;;
   env) cat "$STATE/e2b.env" ;;
   *) echo "usage: $0 up [--https] [--no-build] | down | env" >&2; exit 2 ;;
 esac
