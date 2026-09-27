@@ -107,6 +107,9 @@ allow), image pulls for templates built from public registries (turn off with
 
 - Releases are built by `.github/workflows/release.yml` from a tag, with
   third-party actions pinned to commit SHAs and AWS access through OIDC.
+- The `@weftsh/sandbox` npm package is published from a tag by
+  `.github/workflows/npm.yml` with npm provenance, which links each version
+  to the commit and workflow run that built it.
 - Container images are signed with cosign (keyless). SBOMs and SLSA provenance
   are attached.
 - A release manifest lists the AMI per Region, image digests and the SHA-256 of

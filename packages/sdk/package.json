@@ -4,6 +4,8 @@
   "description": "Weft Sandboxes SDK helpers and admin CLI. Use the unmodified E2B SDK for sandboxes; use this package to configure it and to manage teams, keys, egress policies and templates.",
   "license": "Apache-2.0",
   "homepage": "https://weftsh.github.io/sandy/",
+  "bugs": "https://github.com/Weftsh/sandy/issues",
+  "keywords": ["e2b", "sandbox", "ai-agents", "code-interpreter", "firecracker", "microvm", "self-hosted", "aws"],
   "type": "module",
   "main": "dist/index.js",
   "types": "dist/index.d.ts",
@@ -16,7 +18,7 @@
   "bin": {
     "weft-sandbox": "dist/cli.js"
   },
-  "files": ["dist", "README.md", "LICENSE"],
+  "files": ["dist", "src", "README.md", "LICENSE"],
   "engines": {
     "node": ">=22"
   },
@@ -24,6 +26,9 @@
     "type": "git",
     "url": "git+https://github.com/Weftsh/sandy.git",
     "directory": "packages/sdk"
+  },
+  "publishConfig": {
+    "access": "public"
   },
   "scripts": {
     "build": "tsc -p tsconfig.build.json",

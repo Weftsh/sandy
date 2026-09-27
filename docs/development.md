@@ -126,6 +126,21 @@ python3 -m http.server -d dist 8080
 node og/render.cjs               # regenerate the social images after editing og/card.html
 ```
 
+## Publishing the SDK
+
+`@weftsh/sandbox` (the helpers and the `weft-sandbox` CLI in
+[packages/sdk](../packages/sdk)) is published to npm with provenance by
+[.github/workflows/npm.yml](../.github/workflows/npm.yml). Set the version in
+`packages/sdk/package.json`, merge it to `main`, then push a matching tag:
+
+```sh
+git tag sdk-v0.1.0 && git push origin sdk-v0.1.0
+```
+
+Running the workflow by hand (Actions > npm > Run workflow) is a dry run that
+checks the `NPM_TOKEN` secret, builds, tests and packs without publishing.
+Versions are never republished; the workflow refuses a version that exists.
+
 ## Repository conventions
 
 - Source files start with a comment saying what they do and why.

@@ -1,7 +1,8 @@
 # @weftsh/sandbox
 
-Helpers and an admin CLI for [Weft Sandboxes](https://github.com/Weftsh/sandy),
-self-hosted sandboxes that are compatible with the E2B SDKs.
+Helpers and an admin CLI for [Weft Sandboxes](https://weftsh.github.io/sandy/),
+self-hosted sandboxes that are compatible with the E2B SDKs
+([source](https://github.com/Weftsh/sandy)).
 
 Create and use sandboxes with the unmodified `e2b` package. Use this package
 to point it at your stack and to manage teams, API keys, egress policies and
