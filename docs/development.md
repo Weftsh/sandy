@@ -130,16 +130,12 @@ node og/render.cjs               # regenerate the social images after editing og
 
 `@weftsh/sandbox` (the helpers and the `weft-sandbox` CLI in
 [packages/sdk](../packages/sdk)) is published to npm with provenance by
-[.github/workflows/npm.yml](../.github/workflows/npm.yml). Set the version in
-`packages/sdk/package.json`, merge it to `main`, then push a matching tag:
-
-```sh
-git tag sdk-v0.1.0 && git push origin sdk-v0.1.0
-```
-
-Running the workflow by hand (Actions > npm > Run workflow) is a dry run that
-checks the `NPM_TOKEN` secret, builds, tests and packs without publishing.
-Versions are never republished; the workflow refuses a version that exists.
+[.github/workflows/npm.yml](../.github/workflows/npm.yml). To release, bump the
+version in `packages/sdk/package.json` and merge to `main`: CI publishes any
+version npm does not have yet, using the `NPM_TOKEN` secret, and skips one it
+already has. Pre-release versions (`0.2.0-beta.1`) go to the `next` dist-tag.
+Pull requests that touch the package build, test and pack it without
+publishing.
 
 ## Repository conventions
 

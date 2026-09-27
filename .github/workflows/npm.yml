@@ -1,10 +1,10 @@
 # Publishes @weftsh/sandbox (packages/sdk) to npm, with provenance.
 #
-# To publish, set the version in packages/sdk/package.json, then push a tag
-# that matches it:
-#   git tag sdk-v0.1.0 && git push origin sdk-v0.1.0
-# Run by hand (Actions > npm > Run workflow), it is a dry run: it checks the
-# token, builds, tests and packs, and publishes nothing.
+# To release, bump the version in packages/sdk/package.json and merge to main.
+# On main, this workflow publishes the version if npm does not have it yet and
+# does nothing otherwise. Pre-release versions (1.2.0-beta.1) go to the "next"
+# dist-tag, everything else to "latest". Pull requests build, test and pack
+# the package without publishing. Running it by hand on main retries a publish.
 #
 # Uses the NPM_TOKEN secret: an npm token that can publish to the @weftsh
 # scope. Published versions are never overwritten.
@@ -12,11 +12,15 @@ name: npm
 
 on:
   push:
-    tags: ["sdk-v*"]
+    branches: [main]
+    paths: ["packages/sdk/**", ".github/workflows/npm.yml"]
+  pull_request:
+    paths: ["packages/sdk/**", ".github/workflows/npm.yml"]
   workflow_dispatch:
 
 permissions: {}
 
+# Publishes run one at a time; a queued run finds the version already out.
 concurrency:
   group: npm-${{ github.ref }}
   cancel-in-progress: false
@@ -30,7 +34,7 @@ jobs:
       contents: read # check out the repository
       id-token: write # npm provenance
     env:
-      DRY_RUN: ${{ github.event_name != 'push' }}
+      PUBLISH: ${{ github.ref == 'refs/heads/main' && github.event_name != 'pull_request' }}
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
         with:
@@ -49,42 +53,42 @@ jobs:
           pnpm --filter @weftsh/sandbox run typecheck
           pnpm --filter @weftsh/sandbox test
 
-      - name: Check the version
+      - name: Pack
         working-directory: packages/sdk
-        env:
-          TAG: ${{ github.ref_name }}
+        run: npm pack --dry-run
+
+      - name: Check the version
+        id: version
+        working-directory: packages/sdk
         run: |
           version="$(node -p 'require("./package.json").version')"
-          if [ "$DRY_RUN" = false ] && [ "$TAG" != "sdk-v${version}" ]; then
-            echo "::error::tag ${TAG} does not match packages/sdk/package.json version ${version}"
-            exit 1
-          fi
-          if npm view "@weftsh/sandbox@${version}" version >/dev/null 2>&1; then
-            if [ "$DRY_RUN" = false ]; then
-              echo "::error::@weftsh/sandbox@${version} is already published; bump the version"
-              exit 1
-            fi
-            echo "::notice::@weftsh/sandbox@${version} is already published"
-          fi
-          echo "@weftsh/sandbox ${version}"
+          case "$version" in *-*) tag=next ;; *) tag=latest ;; esac
+          # Ask the registry directly: only a 404 means "not published".
+          status="$(curl -sS -o /dev/null -w '%{http_code}' --retry 3 \
+            "https://registry.npmjs.org/@weftsh%2fsandbox/${version}")"
+          case "$status" in
+            200)
+              echo "::notice::@weftsh/sandbox@${version} is already on npm; nothing to publish"
+              new=false ;;
+            404)
+              echo "@weftsh/sandbox@${version} is not on npm yet (dist-tag ${tag})"
+              new=true ;;
+            *)
+              echo "::error::npm registry answered HTTP ${status}"
+              exit 1 ;;
+          esac
+          { echo "version=${version}"; echo "tag=${tag}"; echo "new=${new}"; } >>"$GITHUB_OUTPUT"
 
-      - name: Check the token
+      - name: Publish
+        if: env.PUBLISH == 'true' && steps.version.outputs.new == 'true'
+        working-directory: packages/sdk
         env:
           NODE_AUTH_TOKEN: ${{ secrets.NPM_TOKEN }}
+          TAG: ${{ steps.version.outputs.tag }}
         run: |
           if [ -z "$NODE_AUTH_TOKEN" ]; then
             echo "::error::the NPM_TOKEN secret is not available to this repository"
             exit 1
           fi
           echo "npm user: $(npm whoami)"
-
-      - name: Publish
-        working-directory: packages/sdk
-        env:
-          NODE_AUTH_TOKEN: ${{ secrets.NPM_TOKEN }}
-        run: |
-          if [ "$DRY_RUN" = true ]; then
-            npm publish --dry-run
-          else
-            npm publish --provenance
-          fi
+          npm publish --provenance --tag "$TAG"
