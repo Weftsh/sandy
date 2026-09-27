@@ -2,7 +2,10 @@
 deny-by-default egress, allowlists and the credential proxy."""
 import json
 import os
+import socket
+import ssl
 import time
+from urllib.parse import urlsplit
 
 import httpx
 import pytest
@@ -46,6 +49,65 @@ def test_user_port_is_reachable_through_the_edge(sandbox):
         time.sleep(0.2)
     assert r.status_code == 200 and r.text.strip() == "served"
     assert sandbox.get_host(8080).startswith(f"8080-{sandbox.sandbox_id}.")
+
+
+UPGRADE_ECHO = """
+import socket
+srv = socket.create_server(("0.0.0.0", 8765))
+while True:
+    conn, _ = srv.accept()
+    buf = b""
+    while b"\\r\\n\\r\\n" not in buf:
+        buf += conn.recv(4096)
+    conn.sendall(b"HTTP/1.1 101 Switching Protocols\\r\\nUpgrade: websocket\\r\\nConnection: Upgrade\\r\\n\\r\\n")
+    while (data := conn.recv(4096)):
+        conn.sendall(data)
+    conn.close()
+"""
+
+
+def test_upgraded_connections_are_bidirectional(sandbox):
+    """WebSocket-style upgrades reach the sandbox port and stream both ways."""
+    sandbox.files.write("/tmp/upgrade_echo.py", UPGRADE_ECHO)
+    sandbox.commands.run("python3 /tmp/upgrade_echo.py", background=True)
+    base = os.environ.get("E2B_SANDBOX_URL")
+    if base:
+        target = urlsplit(base)
+        host, port, tls = target.hostname, target.port or 80, target.scheme == "https"
+        host_header = target.netloc
+        extra = f"E2b-Sandbox-Id: {sandbox.sandbox_id}\r\nE2b-Sandbox-Port: 8765\r\n"
+    else:
+        target = urlsplit(f"https://{sandbox.get_host(8765)}")
+        host, port, tls = target.hostname, target.port or 443, True
+        host_header = target.netloc
+        extra = ""
+    request = (
+        f"GET /socket HTTP/1.1\r\nHost: {host_header}\r\n{extra}"
+        "Connection: Upgrade\r\nUpgrade: websocket\r\n"
+        "Sec-WebSocket-Version: 13\r\nSec-WebSocket-Key: dGhlIHNhbXBsZSBub25jZQ==\r\n\r\n"
+    ).encode()
+    for _ in range(50):
+        raw = socket.create_connection((host, port), timeout=10)
+        conn = ssl.create_default_context(cafile=os.environ.get("SSL_CERT_FILE")).wrap_socket(raw, server_hostname=host) if tls else raw
+        conn.sendall(request)
+        head = b""
+        while b"\r\n\r\n" not in head:
+            chunk = conn.recv(4096)
+            if not chunk:
+                break
+            head += chunk
+        if head.startswith(b"HTTP/1.1 101"):
+            break
+        conn.close()
+        time.sleep(0.2)
+    assert head.startswith(b"HTTP/1.1 101"), head[:200]
+    for message in (b"ping", b"x" * 100_000):
+        conn.sendall(message)
+        echoed = b""
+        while len(echoed) < len(message):
+            echoed += conn.recv(65536)
+        assert echoed == message
+    conn.close()
 
 
 def test_envd_internal_endpoints_are_not_reachable(sandbox):

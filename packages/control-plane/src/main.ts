@@ -20,7 +20,7 @@ import { InternalAuth } from "./auth/internal.js";
 import { buildApi } from "./api/server.js";
 import { loadConfig, type Config } from "./config.js";
 import { Edge, createEdgeServer } from "./edge/proxy.js";
-import { HostRegistry } from "./hosts/registry.js";
+import { HostRegistry, hostUtilization } from "./hosts/registry.js";
 import { LicenseService } from "./license/service.js";
 import { jsonLogger, type Logger } from "./log.js";
 import { SandboxService } from "./sandboxes/service.js";
@@ -159,8 +159,10 @@ export function startWorker(app: App): () => void {
     const cw = new CloudWatchClient({ region: app.config.region });
     every(60_000, "metrics", async () => {
       const hosts = await app.hosts.liveHosts();
+      // Capacity-weighted mean of each host's utilization (the tighter of its
+      // slots and its memory), so memory-bound hosts also trigger scale-out.
       const capacity = hosts.reduce((n, h) => n + h.capacity.maxSandboxes, 0);
-      const used = hosts.reduce((n, h) => n + h.sandboxes.length, 0);
+      const used = hosts.reduce((n, h) => n + hostUtilization(h) * h.capacity.maxSandboxes, 0);
       const running = (await app.store.listAllSandboxes()).filter((s) => s.state === "running").length;
       await app.license.recordConcurrency(running);
       await cw.send(

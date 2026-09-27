@@ -186,6 +186,7 @@ up() {
     echo "export WEFT_DEV_ECHO_KEY=$STATE/echo.key.pem"
     echo "export WEFT_DEV_UPSTREAM_CA=$STATE/upstream-ca.pem"
     echo "export WEFT_DEV_ECHO_SECRET=$echo_secret"
+    echo "export WEFT_DEV_IMAGE=$BASE_IMAGE"
     if [[ $https -eq 1 ]]; then
       cat /etc/ssl/certs/ca-certificates.crt "$STATE/edge-ca.pem" > "$STATE/ca-bundle.pem"
       echo "export SSL_CERT_FILE=$STATE/ca-bundle.pem"

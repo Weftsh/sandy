@@ -24,11 +24,26 @@ export interface HeartbeatRequest {
   token: string;
   version: string;
   runtime: string;
-  capacity: { maxSandboxes: number; vcpus: number; memoryMib: number };
+  capacity: { maxSandboxes: number; vcpus: number; memoryMib: number; memoryBudgetMib?: number };
   sandboxes: { sandboxId: string; state: string }[];
   templates: string[];
   draining: boolean;
+  memoryCommittedMib?: number;
 }
+
+/**
+ * How full a host is, 0 to 1: the tighter of its sandbox slots and its guest
+ * memory budget. Autoscaling and placement both use it, so a host full on
+ * memory counts as full even with slots to spare.
+ */
+export function hostUtilization(h: Host, extraSandboxes = 0): number {
+  const slots = (h.sandboxes.length + extraSandboxes) / Math.max(1, h.capacity.maxSandboxes);
+  const budget = h.capacity.memoryBudgetMib;
+  const memory = budget ? (h.memoryCommittedMib ?? 0) / budget : 0;
+  return Math.min(1, Math.max(slots, memory));
+}
+
+const optionalCount = (v: unknown) => v === undefined || v === null || (typeof v === "number" && Number.isFinite(v) && v >= 0);
 
 function validateHeartbeat(raw: unknown): HeartbeatRequest {
   const r = raw as HeartbeatRequest;
@@ -45,6 +60,9 @@ function validateHeartbeat(raw: unknown): HeartbeatRequest {
     r.token.length >= 32 &&
     typeof r.runtime === "string" &&
     typeof r.capacity === "object" &&
+    r.capacity !== null &&
+    optionalCount(r.capacity.memoryBudgetMib) &&
+    optionalCount(r.memoryCommittedMib) &&
     Array.isArray(r.sandboxes) &&
     Array.isArray(r.templates);
   if (!ok) throw badRequest("malformed heartbeat");
@@ -86,6 +104,7 @@ export class HostRegistry {
       sandboxes: req.sandboxes.map((s) => ({ sandboxId: s.sandboxId, state: s.state })),
       templates: req.templates,
       draining: req.draining,
+      ...(typeof req.memoryCommittedMib === "number" ? { memoryCommittedMib: req.memoryCommittedMib } : {}),
       lastHeartbeatAt: at,
       registeredAt: previous && previous.certPem === req.certPem ? previous.registeredAt : at,
     };
@@ -127,9 +146,10 @@ export class HostRegistry {
         !h.draining &&
         !opts.exclude?.has(h.hostId) &&
         (!opts.requiredHost || h.hostId === opts.requiredHost) &&
-        h.sandboxes.length + (this.inflight.get(h.hostId) ?? 0) < h.capacity.maxSandboxes,
+        h.sandboxes.length + (this.inflight.get(h.hostId) ?? 0) < h.capacity.maxSandboxes &&
+        hostUtilization(h) < 1,
     );
-    const load = (h: Host) => (h.sandboxes.length + (this.inflight.get(h.hostId) ?? 0)) / Math.max(1, h.capacity.maxSandboxes);
+    const load = (h: Host) => hostUtilization(h, this.inflight.get(h.hostId) ?? 0);
     candidates.sort((a, b) => {
       const cachedA = a.templates.includes(opts.buildId) ? 0 : 1;
       const cachedB = b.templates.includes(opts.buildId) ? 0 : 1;

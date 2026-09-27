@@ -505,6 +505,14 @@ mod tests {
         assert!(p.check_ip("1.1.1.1".parse().unwrap(), 443).is_allowed());
         assert!(!p.check_ip("10.0.0.1".parse().unwrap(), 443).is_allowed());
         assert!(!p.check_ip("127.0.0.1".parse().unwrap(), 443).is_allowed());
+        assert_eq!(
+            p.check_resolved("127.0.0.1".parse().unwrap(), 443),
+            Decision::Deny(DenyReason::ForbiddenAddress)
+        );
+        assert_eq!(
+            p.check_resolved("169.254.169.254".parse().unwrap(), 80),
+            Decision::Deny(DenyReason::ForbiddenAddress)
+        );
         assert!(!p
             .check_resolved("192.168.0.1".parse().unwrap(), 443)
             .is_allowed());

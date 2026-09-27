@@ -47,6 +47,7 @@ Templates
   templates build --name <name> --image <image-ref> [options] [--wait]
   templates build --name <name> --dockerfile <path> --repository <ecr-uri> [--context <dir>] [options] [--wait]
       options: --cpu <n> --memory <MiB> --disk <MiB> --start-cmd <cmd> --ready-cmd <cmd> --env K=V --public
+  templates rebuild <template-id> [--wait]   same image and settings, new build
   templates delete <template-id>
 
 Fleet
@@ -206,6 +207,16 @@ async function main(argv: string[]): Promise<void> {
     case "templates get":
       if (!rest[0]) fail("templates get needs a template ID");
       return print(await admin.templates.get(rest[0]));
+    case "templates rebuild": {
+      if (!rest[0]) fail("templates rebuild needs a template ID");
+      const t = await admin.templates.rebuild(rest[0]);
+      process.stdout.write(`${templateLine(t)}\n`);
+      if (values.wait) {
+        const ready = await admin.templates.waitUntilReady(t.templateId, { onLog: (l) => process.stderr.write(`  ${l}\n`) });
+        process.stdout.write(`ready: ${templateLine(ready)}\n`);
+      }
+      return;
+    }
     case "templates delete":
       if (!rest[0]) fail("templates delete needs a template ID");
       await admin.templates.delete(rest[0]);

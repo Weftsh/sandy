@@ -99,6 +99,8 @@ export interface LicenseStatus {
   warnings: string[];
   notice?: string;
   peakThisMonth: number;
+  /** Peak concurrent sandboxes per UTC month (`YYYY-MM`), last 13 months. */
+  monthlyPeaks?: Record<string, number>;
 }
 
 export class WeftApiError extends Error {

@@ -125,10 +125,12 @@ export interface Host {
   token: string;
   version: string;
   runtime: string;
-  capacity: { maxSandboxes: number; vcpus: number; memoryMib: number };
+  capacity: { maxSandboxes: number; vcpus: number; memoryMib: number; memoryBudgetMib?: number };
   sandboxes: { sandboxId: string; state: string }[];
   templates: string[];
   draining: boolean;
+  /** Guest memory committed on the host, overhead included. */
+  memoryCommittedMib?: number;
   lastHeartbeatAt: string;
   registeredAt: string;
 }

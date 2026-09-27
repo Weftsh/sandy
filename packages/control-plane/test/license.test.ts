@@ -27,14 +27,14 @@ function payload(overrides: Partial<LicensePayload> = {}): LicensePayload {
   };
 }
 
-function service(fetchImpl?: typeof fetch) {
-  const store = new MemoryStore();
+function service(fetchImpl?: typeof fetch, store = new MemoryStore(), configuredKey?: string) {
   const svc = new LicenseService(
     store,
     {
       version: "0.1.0",
       region: "eu-west-1",
       mode: "key",
+      configuredKey,
       extraPublicKeys: { "dev-1": publicKeyPem },
       fetch: fetchImpl,
       endpoint: "https://license.test/v1/check",
@@ -54,6 +54,25 @@ describe("license service", () => {
     expect(status).toMatchObject({ state: "active", tier: "team", licenseId: "lic_team_42", maxConcurrent: 2 });
   });
 
+  it("keeps an API-installed key until the configured key changes", async () => {
+    const store = new MemoryStore();
+    const fromStack = await issueLicenseKey(payload({ lid: "lic_stack" }), signer);
+    const fromApi = await issueLicenseKey(payload({ lid: "lic_api" }), signer);
+    const first = service(undefined, store, fromStack).svc;
+    await first.init();
+    expect((await first.status()).licenseId).toBe("lic_stack");
+    await first.installKey(fromApi);
+
+    const restarted = service(undefined, store, fromStack).svc;
+    await restarted.init();
+    expect((await restarted.status()).licenseId).toBe("lic_api");
+
+    const renewed = await issueLicenseKey(payload({ lid: "lic_renewed" }), signer);
+    const updated = service(undefined, store, renewed).svc;
+    await updated.init();
+    expect((await updated.status()).licenseId).toBe("lic_renewed");
+  });
+
   it("rejects keys that do not verify", async () => {
     const { svc } = service();
     const other = localSigner(createPrivateKey(generateSigningKeyPair().privateKeyPem));
@@ -68,6 +87,7 @@ describe("license service", () => {
     const status = await svc.status();
     expect(status.overCap).toBe(true);
     expect(status.peakThisMonth).toBe(3);
+    expect(status.monthlyPeaks).toEqual({ [new Date().toISOString().slice(0, 7)]: 3 });
     expect(status).not.toHaveProperty("allowed");
   });
 

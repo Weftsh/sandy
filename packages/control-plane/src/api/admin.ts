@@ -124,6 +124,7 @@ export function registerAdminRoutes(app: FastifyInstance, d: AdminDeps): void {
     if (!t) throw notFound("team not found");
     t.egressPolicy = validatePolicy(req.body);
     await d.store.putTeam(t);
+    await d.sandboxes.applyTeamPolicy(t.teamId);
     return teamView(t);
   });
   app.get("/weft/v1/teams/:teamId/api-keys", async (req: Req) => {

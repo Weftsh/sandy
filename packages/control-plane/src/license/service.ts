@@ -28,6 +28,9 @@ import type { Store } from "../store/types.js";
 
 interface LicenseState {
   key?: string;
+  /** The configured (stack parameter) key last applied, so a key installed
+   * through the API is replaced only when the parameter changes. */
+  configuredKey?: string;
   installedAt: string;
   lastCheckAt?: string;
   lastCheckStatus?: RemoteLicenseStatus;
@@ -76,8 +79,10 @@ export class LicenseService {
 
   async init(): Promise<void> {
     const state = await this.state();
-    if (this.opts.configuredKey && state.key !== this.opts.configuredKey) {
-      state.key = this.opts.configuredKey;
+    const configured = this.opts.configuredKey?.trim();
+    if (configured && state.configuredKey !== configured) {
+      state.key = configured;
+      state.configuredKey = configured;
       await this.store.putMeta(STATE_KEY, state);
     }
     this.accountId = await this.opts.accountId?.().catch(() => undefined);
@@ -108,7 +113,9 @@ export class LicenseService {
     return this.status();
   }
 
-  async status(now = new Date()): Promise<LicenseStatus & { notice?: string; peakThisMonth: number }> {
+  async status(
+    now = new Date(),
+  ): Promise<LicenseStatus & { notice?: string; peakThisMonth: number; monthlyPeaks: Record<string, number> }> {
     const state = await this.state();
     const usage = await this.usage();
     const status = evaluateLicense({
@@ -126,7 +133,9 @@ export class LicenseService {
       this.lastWarnings = warnings;
       if (warnings) this.log.warn("license attention needed", { warnings: status.warnings });
     }
-    return { ...status, notice: state.notice, peakThisMonth: usage.monthly[monthKey(now)] ?? 0 };
+    // Monthly peaks (UTC, last 13 months) are what an offline license's annual
+    // true-up reports.
+    return { ...status, notice: state.notice, peakThisMonth: usage.monthly[monthKey(now)] ?? 0, monthlyPeaks: { ...usage.monthly } };
   }
 
   /** Records the current number of running sandboxes. */

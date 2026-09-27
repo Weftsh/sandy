@@ -135,6 +135,15 @@ struct RunArgs {
     slot_pool: String,
     #[arg(long, env = "WEFT_MAX_SANDBOXES", default_value_t = 64)]
     max_sandboxes: u32,
+    /// Host memory kept back from sandboxes for the OS, the agent and page
+    /// cache (Firecracker runtime).
+    #[arg(long, env = "WEFT_MEMORY_RESERVE_MIB", default_value_t = 2048)]
+    memory_reserve_mib: u64,
+    /// Ratio of guest memory to commit against the rest of host memory.
+    /// Above 1.0 overcommits, which relies on guests not touching all of
+    /// their memory.
+    #[arg(long, env = "WEFT_MEMORY_OVERCOMMIT", default_value_t = 1.0)]
+    memory_overcommit: f64,
 
     #[arg(
         long,
@@ -254,12 +263,26 @@ async fn run(args: RunArgs) -> anyhow::Result<()> {
         ),
     };
 
+    let memory_total = memory_mib().unwrap_or(0);
+    let memory_budget_mib = match args.runtime {
+        // The namespace runtime does not reserve guest memory.
+        RuntimeKind::Namespace => None,
+        RuntimeKind::Firecracker => {
+            anyhow::ensure!(
+                args.memory_overcommit > 0.0 && args.memory_overcommit <= 4.0,
+                "--memory-overcommit must be above 0 and at most 4"
+            );
+            let usable = memory_total.saturating_sub(args.memory_reserve_mib);
+            Some((usable as f64 * args.memory_overcommit) as u64)
+        }
+    };
     let capacity = Capacity {
         max_sandboxes: args.max_sandboxes,
         vcpus: std::thread::available_parallelism()
             .map(|n| n.get() as u32)
             .unwrap_or(1),
-        memory_mib: memory_mib().unwrap_or(0),
+        memory_mib: memory_total,
+        memory_budget_mib,
     };
     let slots = Arc::new(SlotTable::new(net.clone(), args.max_sandboxes));
     let manager = Arc::new(Manager::new(
@@ -269,6 +292,7 @@ async fn run(args: RunArgs) -> anyhow::Result<()> {
             guest_dir: args.guest_dir.clone(),
             max_vcpus: capacity.vcpus,
             max_memory_mib: (capacity.memory_mib as u32).max(1024),
+            memory_budget_mib,
         },
         runtime,
         slots.clone(),

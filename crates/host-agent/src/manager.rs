@@ -69,6 +69,32 @@ pub struct ManagerConfig {
     pub guest_dir: PathBuf,
     pub max_vcpus: u32,
     pub max_memory_mib: u32,
+    /// Guest memory this host may commit across its sandboxes, each charged
+    /// its memory plus [`SANDBOX_OVERHEAD_MIB`]. `None` means no limit (the
+    /// namespace runtime, which does not reserve guest memory).
+    pub memory_budget_mib: Option<u64>,
+}
+
+/// Memory charged per sandbox beyond guest RAM: the VMM, device buffers and
+/// page cache for its disk (the Firecracker cgroup allowance).
+pub const SANDBOX_OVERHEAD_MIB: u64 = 128;
+
+/// Whether one more sandbox with `request_mib` of memory fits in `budget_mib`
+/// next to sandboxes with `running_mib`. On failure, returns the memory
+/// already committed.
+fn memory_fits(
+    running_mib: impl Iterator<Item = u32>,
+    request_mib: u32,
+    budget_mib: u64,
+) -> std::result::Result<(), u64> {
+    let committed: u64 = running_mib
+        .map(|m| u64::from(m) + SANDBOX_OVERHEAD_MIB)
+        .sum();
+    if committed + u64::from(request_mib) + SANDBOX_OVERHEAD_MIB > budget_mib {
+        Err(committed)
+    } else {
+        Ok(())
+    }
 }
 
 /// Template metadata kept next to the cached files.
@@ -85,6 +111,7 @@ struct TemplateMeta {
 struct Sandbox {
     id: String,
     slot: Slot,
+    memory_mib: u32,
     link: GuestLink,
     started_at: String,
     state: Mutex<SandboxState>,
@@ -261,6 +288,7 @@ impl Manager {
         let sb = Arc::new(Sandbox {
             id: id.to_owned(),
             slot: slot.clone(),
+            memory_mib: req.memory_mib,
             link: link.clone(),
             started_at: now_rfc3339(),
             state: Mutex::new(SandboxState::Starting),
@@ -272,6 +300,15 @@ impl Manager {
             if map.contains_key(id) {
                 self.slots.release(slot.index);
                 return Err(ManagerError::Conflict("sandbox is already starting".into()));
+            }
+            if let Some(budget) = self.cfg.memory_budget_mib {
+                let running = map.values().map(|s| s.memory_mib);
+                if let Err(committed) = memory_fits(running, req.memory_mib, budget) {
+                    self.slots.release(slot.index);
+                    return Err(ManagerError::Capacity(format!(
+                        "host is full: {committed} of {budget} MiB of guest memory committed"
+                    )));
+                }
             }
             map.insert(id.to_owned(), sb.clone());
         }
@@ -973,6 +1010,16 @@ impl Manager {
         Ok((env, workdir, artifacts))
     }
 
+    /// Guest memory committed to sandboxes on this host, overhead included.
+    pub fn memory_committed_mib(&self) -> u64 {
+        self.sandboxes
+            .lock()
+            .expect("poisoned")
+            .values()
+            .map(|s| u64::from(s.memory_mib) + SANDBOX_OVERHEAD_MIB)
+            .sum()
+    }
+
     pub fn health(&self, capacity: Capacity, version: &str) -> HostHealth {
         let list = self.list();
         HostHealth {
@@ -1000,6 +1047,15 @@ fn shell_quote(s: &str) -> String {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn memory_admission_counts_overhead() {
+        // 4 GiB budget: three 1 GiB sandboxes plus overhead leave 640 MiB.
+        let running = [1024, 1024, 1024];
+        assert_eq!(memory_fits(running.into_iter(), 512, 4096), Ok(()));
+        assert_eq!(memory_fits(running.into_iter(), 1024, 4096), Err(3456));
+        assert_eq!(memory_fits(std::iter::empty(), 4096, 4096), Err(0));
+    }
 
     #[test]
     fn validates_ids() {

@@ -103,6 +103,7 @@ async function startFakeHost(hostId: string, runtime: "firecracker" | "namespace
         host.sandboxes.set(m[1]!, body);
         return json(200, { sandboxId: m[1], state: "running", envdVersion: "0.9.0", startedAt: new Date().toISOString() });
       }
+      if (/^\/v1\/sandboxes\/[a-z0-9]+\/egress$/.test(req.url!) && req.method === "PUT") return res.writeHead(204).end();
       if (m && req.method === "DELETE") {
         host.sandboxes.delete(m[1]!);
         return res.writeHead(204).end();
@@ -394,6 +395,27 @@ describe("control plane with fake Firecracker hosts", () => {
     await call("DELETE", `/sandboxes/${created.sandboxID}`, undefined, team.apiKey.key);
   });
 
+  it("applies team policy changes to existing sandboxes, failing closed", async () => {
+    const team = (await call("POST", "/weft/v1/teams", { name: "revoke" }, adminKey)).body;
+    const teamId = team.team.teamId as string;
+    const key = team.apiKey.key as string;
+    await call("PUT", `/weft/v1/teams/${teamId}/egress`, { allow: [{ host: "pypi.org" }, { host: "api.github.com" }] }, adminKey);
+    const wide = (await call("POST", "/v2/sandboxes", { templateID: "base" }, key)).body;
+    const narrow = (await call("POST", "/v2/sandboxes", { templateID: "base", network: { denyOut: ["0.0.0.0/0"], allowOut: ["pypi.org"] } }, key)).body;
+    const policyOf = async (id: string) =>
+      ((await (await fetch(`${base}/internal/v1/sandboxes/${id}/egress`, { headers: { "x-weft-internal-auth": `dev-token ${DEV_TOKEN}` } })).json()) as { policy: unknown }).policy;
+    expect(await policyOf(narrow.sandboxID)).toEqual({ allow: [{ host: "pypi.org" }], credentials: [] });
+
+    for (const h of hosts) h.requests.length = 0;
+    await call("PUT", `/weft/v1/teams/${teamId}/egress`, { allow: [{ host: "api.github.com" }] }, adminKey);
+    expect(await policyOf(wide.sandboxID)).toEqual({ allow: [{ host: "api.github.com" }], credentials: [] });
+    // pypi.org is no longer allowed, so the narrowed sandbox loses everything.
+    expect(await policyOf(narrow.sandboxID)).toEqual({ allow: [], credentials: [] });
+    const pushed = hosts.flatMap((h) => h.requests).filter((r) => r.method === "PUT" && r.path.endsWith("/egress"));
+    expect(pushed.map((r) => r.path).sort()).toEqual([`/v1/sandboxes/${narrow.sandboxID}/egress`, `/v1/sandboxes/${wide.sandboxID}/egress`].sort());
+    for (const id of [wide.sandboxID, narrow.sandboxID]) await call("DELETE", `/sandboxes/${id}`, undefined, key);
+  });
+
   it("returns E2B-shaped errors", async () => {
     const res = await call("POST", "/v2/sandboxes", { templateID: "missing" });
     expect(res.status).toBe(404);
@@ -403,5 +425,13 @@ describe("control plane with fake Firecracker hosts", () => {
     expect(((await bad.json()) as { code: number }).code).toBe(400);
     const empty = await fetch(`${base}/sandboxes/abc/pause`, { method: "POST", headers: { "x-api-key": teamKey, "content-type": "application/json" } });
     expect(empty.status).toBe(404);
+  });
+
+  it("rejects options it cannot honor instead of ignoring them", async () => {
+    for (const body of [{ autoPause: true, autoResume: { enabled: true } }, { mcp: {} }, { volumeMounts: [{ name: "v", path: "/data" }] }]) {
+      const res = await call("POST", "/v2/sandboxes", { templateID: "base", ...body });
+      expect(res.status).toBe(400);
+      expect((res.body as { code: number }).code).toBe(400);
+    }
   });
 });

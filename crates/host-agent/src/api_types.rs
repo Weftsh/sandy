@@ -258,6 +258,10 @@ pub struct Capacity {
     pub max_sandboxes: u32,
     pub vcpus: u32,
     pub memory_mib: u64,
+    /// Guest memory the host commits to sandboxes at most (see
+    /// `ManagerConfig::memory_budget_mib`); absent when unlimited.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub memory_budget_mib: Option<u64>,
 }
 
 /// Body of the host's periodic `POST /internal/v1/hosts/heartbeat` to the
@@ -280,6 +284,9 @@ pub struct HeartbeatRequest {
     /// Template builds cached on this host.
     pub templates: Vec<String>,
     pub draining: bool,
+    /// Guest memory committed to this host's sandboxes, overhead included.
+    #[serde(default)]
+    pub memory_committed_mib: u64,
 }
 
 #[derive(Clone, Debug, Serialize, Deserialize, PartialEq, Eq)]

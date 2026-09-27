@@ -6,6 +6,10 @@ import { parseMetadataFilter } from "../src/sandboxes/service.js";
 import { InternalAuth } from "../src/auth/internal.js";
 import { hashKey, newApiKey, newSandboxId, randomId } from "../src/ids.js";
 import { ApiError } from "../src/errors.js";
+import { ApiKeys } from "../src/auth/apikeys.js";
+import { MemoryStore } from "../src/store/memory.js";
+import { hostUtilization } from "../src/hosts/registry.js";
+import type { Host } from "../src/store/types.js";
 
 const team: EgressPolicy = {
   allow: [{ host: "*.pypi.org" }, { host: "pypi.org" }, { host: "api.github.com" }, { host: "10.20.0.0/16", ports: [5432] }],
@@ -199,5 +203,34 @@ describe("internal auth", () => {
     await expect(dev.verify("dev-token wrong")).rejects.toThrow();
     await expect(new InternalAuth(cfg).verify("dev-token a-long-development-token")).rejects.toThrow();
     await expect(dev.verify(undefined)).rejects.toThrow(/missing/);
+  });
+});
+
+describe("bootstrap admin key", () => {
+  it("revokes the previous key when the secret is rotated", async () => {
+    const store = new MemoryStore();
+    const oldKey = newApiKey();
+    const newKey = newApiKey();
+    await new ApiKeys(store).ensureAdminKey(oldKey);
+    // A restart with the rotated secret.
+    const keys = new ApiKeys(store);
+    await keys.ensureAdminKey(newKey);
+    await expect(keys.authenticate({ "x-api-key": newKey })).resolves.toMatchObject({ role: "admin" });
+    await expect(keys.authenticate({ "x-api-key": oldKey })).rejects.toThrow();
+    // Restarting with the same secret changes nothing.
+    await keys.ensureAdminKey(newKey);
+    await expect(keys.authenticate({ "x-api-key": newKey })).resolves.toMatchObject({ role: "admin" });
+  });
+});
+
+describe("host utilization", () => {
+  const host = (sandboxes: number, capacity: Host["capacity"], memoryCommittedMib?: number) =>
+    ({ sandboxes: Array.from({ length: sandboxes }, (_, i) => ({ sandboxId: `s${i}`, state: "running" })), capacity, memoryCommittedMib }) as Host;
+
+  it("uses the tighter of slots and memory", () => {
+    expect(hostUtilization(host(8, { maxSandboxes: 32, vcpus: 8, memoryMib: 16384 }))).toBe(0.25);
+    expect(hostUtilization(host(8, { maxSandboxes: 32, vcpus: 8, memoryMib: 16384, memoryBudgetMib: 14336 }, 10752))).toBe(0.75);
+    expect(hostUtilization(host(8, { maxSandboxes: 32, vcpus: 8, memoryMib: 16384, memoryBudgetMib: 14336 }, 20000))).toBe(1);
+    expect(hostUtilization(host(31, { maxSandboxes: 32, vcpus: 8, memoryMib: 16384 }), 1)).toBe(1);
   });
 });

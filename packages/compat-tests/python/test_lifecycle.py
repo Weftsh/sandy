@@ -71,6 +71,26 @@ def test_timeout_kills_the_sandbox(tag):
     assert not sbx.is_running()
 
 
+def test_timeout_can_pause_instead_of_kill(tag):
+    sbx = Sandbox.create(metadata=tag, timeout=60, lifecycle={"on_timeout": "pause"})
+    try:
+        sbx.files.write("/home/user/auto.txt", "paused on timeout")
+        sbx.set_timeout(2)
+        deadline = time.time() + 30
+        while time.time() < deadline and Sandbox.get_info(sbx.sandbox_id).state != SandboxState.PAUSED:
+            time.sleep(1)
+        assert Sandbox.get_info(sbx.sandbox_id).state == SandboxState.PAUSED
+        resumed = Sandbox.connect(sbx.sandbox_id, timeout=60)
+        assert resumed.files.read("/home/user/auto.txt") == "paused on timeout"
+    finally:
+        Sandbox.kill(sbx.sandbox_id)
+
+
+def test_auto_resume_is_rejected_rather_than_ignored(tag):
+    with pytest.raises(SandboxException):
+        Sandbox.create(metadata=tag, timeout=60, lifecycle={"on_timeout": "pause", "auto_resume": True})
+
+
 def test_set_timeout_extends_end_time(sandbox):
     before = sandbox.get_info().end_at
     sandbox.set_timeout(600)

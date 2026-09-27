@@ -88,6 +88,7 @@ impl Registration {
                 .collect(),
             templates: manager.cached_templates(),
             draining: false,
+            memory_committed_mib: manager.memory_committed_mib(),
         };
         let header = self.auth.header().await?;
         let resp = http

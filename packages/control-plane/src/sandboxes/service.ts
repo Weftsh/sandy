@@ -159,6 +159,12 @@ export class SandboxService {
       if (body[unsupported] !== undefined && body[unsupported] !== null) throw badRequest(`${unsupported} is not supported by this deployment`);
     }
     if (Array.isArray(body.volumeMounts) && body.volumeMounts.length > 0) throw badRequest("volumeMounts are not supported by this deployment");
+    const autoResume = body.autoResume as { enabled?: unknown } | null | undefined;
+    if (typeof autoResume === "object" && autoResume !== null && autoResume.enabled === true) {
+      // Traffic to a paused sandbox does not wake it; failing here beats a
+      // sandbox that silently stays paused.
+      throw badRequest("autoResume is not supported by this deployment yet; resume paused sandboxes with Sandbox.connect()");
+    }
     const metadata = stringMap(body.metadata, "metadata");
     const envVars = stringMap(body.envVars, "envVars");
     const timeoutSec = this.timeout(body.timeout);
@@ -195,7 +201,7 @@ export class SandboxService {
       startedAt: now.toISOString(),
       endAt: new Date(now.getTime() + timeoutSec * 1000).toISOString(),
       autoPause: body.autoPause === true,
-      autoResume: typeof body.autoResume === "object" && body.autoResume !== null && (body.autoResume as { enabled?: unknown }).enabled === true,
+      autoResume: false,
       allowInternetAccess,
       network,
       egressPolicy: policy,
@@ -521,6 +527,43 @@ export class SandboxService {
     if (saved.state === "running" && saved.hostId) {
       const client = await this.hosts.clientFor(saved.hostId);
       await client?.request("PUT", `/v1/sandboxes/${sandboxId}/egress`, policy);
+    }
+  }
+
+  /**
+   * Re-applies a team's egress policy to the team's existing sandboxes, so
+   * removing access takes effect for them too, not only for new sandboxes.
+   * A sandbox whose SDK network options no longer fit the new policy loses
+   * all egress (fail closed).
+   */
+  async applyTeamPolicy(teamId: string): Promise<void> {
+    const team = await this.store.getTeam(teamId);
+    const teamPolicy = team?.egressPolicy ?? DENY_ALL;
+    for (const listed of await this.store.listSandboxesByTeam(teamId)) {
+      for (let attempt = 0; attempt < 3; attempt++) {
+        const s = await this.store.getSandbox(listed.sandboxId);
+        if (!s) break;
+        let policy: EgressPolicy;
+        try {
+          policy = sandboxPolicy(teamPolicy, { allowInternetAccess: s.allowInternetAccess, network: s.network });
+        } catch {
+          policy = DENY_ALL;
+        }
+        let saved: Sandbox;
+        try {
+          saved = await this.save({ ...s, egressPolicy: policy });
+        } catch (e) {
+          if (e instanceof VersionConflict) continue;
+          throw e;
+        }
+        if (saved.state === "running" && saved.hostId) {
+          const client = await this.hosts.clientFor(saved.hostId);
+          await client?.request("PUT", `/v1/sandboxes/${saved.sandboxId}/egress`, policy).catch((err: unknown) =>
+            this.log.warn("pushing egress policy to host failed", { sandboxId: saved.sandboxId, hostId: saved.hostId, error: String(err) }),
+          );
+        }
+        break;
+      }
     }
   }
 

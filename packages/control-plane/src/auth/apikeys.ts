@@ -13,6 +13,7 @@ export interface Principal {
 }
 
 export const ADMIN_TEAM_ID = "team_admin";
+const BOOTSTRAP_ADMIN_KEY_ID = "key_bootstrap_admin";
 
 export function presentedKey(headers: Record<string, string | string[] | undefined>): string | undefined {
   const x = headers["x-api-key"];
@@ -68,12 +69,22 @@ export class ApiKeys {
   }
 
   /** Makes sure a configured bootstrap admin key exists. */
+  /**
+   * Makes the stack's bootstrap admin key valid and revokes any previous
+   * bootstrap key, so rotating the secret and restarting retires the old one.
+   */
   async ensureAdminKey(plaintext: string): Promise<void> {
     const hash = hashKey(plaintext);
+    for (const old of await this.store.listApiKeys(ADMIN_TEAM_ID)) {
+      if (old.keyId === BOOTSTRAP_ADMIN_KEY_ID && old.keyHash !== hash) {
+        await this.store.deleteApiKey(old.keyHash);
+        this.cache.delete(old.keyHash);
+      }
+    }
     if (await this.store.getApiKeyByHash(hash)) return;
     await this.store.putApiKey({
       keyHash: hash,
-      keyId: "key_bootstrap_admin",
+      keyId: BOOTSTRAP_ADMIN_KEY_ID,
       teamId: ADMIN_TEAM_ID,
       role: "admin",
       name: "bootstrap admin key",

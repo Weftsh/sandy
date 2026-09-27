@@ -371,12 +371,14 @@ async fn forbidden_addresses_are_denied_even_with_a_wildcard_policy() {
     assert!(closed_without_data(&mut lo).await);
     assert_eq!(env.banner_accepts.load(Ordering::SeqCst), 0);
 
-    // Names that resolve to loopback are denied after resolution.
+    // `*` never covers single-label names such as `localhost`, so they are
+    // refused before resolution. (Names that resolve to a forbidden address
+    // are refused after it; see `check_resolved` in weft-netpolicy.)
     let tcp = env.connect("star", &Env::named_dst(80)).await;
     let mut client = http_client(tcp).await;
     let answer = send(&mut client, get("localhost", "/")).await;
     assert_eq!(answer.status, StatusCode::FORBIDDEN);
-    assert_eq!(answer.reason(), "forbidden_address");
+    assert_eq!(answer.reason(), "not_allowed");
     drop(client);
 
     let tcp = env.connect("star", &Env::named_dst(443)).await;
@@ -388,9 +390,9 @@ async fn forbidden_addresses_are_denied_even_with_a_wildcard_policy() {
 
     let lines = wait_for_connections(&sbx, 4).await;
     assert!(
-        lines
-            .iter()
-            .all(|l| l["decision"] == "deny" && l["reason"] == "forbidden_address"),
+        lines.iter().all(|l| l["decision"] == "deny"
+            && (l["reason"] == "forbidden_address" || l["dstHost"] == "localhost")
+            && (l["reason"] == "not_allowed" || l["dstHost"] != "localhost")),
         "{lines:#?}"
     );
 }
@@ -530,7 +532,7 @@ async fn per_sandbox_connection_limit() {
     let mut client = http_client(tcp).await;
     assert_eq!(
         send(&mut client, get("localhost", "/")).await.reason(),
-        "forbidden_address"
+        "not_allowed"
     );
     drop(held);
 }
