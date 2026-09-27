@@ -6,8 +6,10 @@
 # dist-tag, everything else to "latest". Pull requests build, test and pack
 # the package without publishing. Running it by hand on main retries a publish.
 #
-# Uses the NPM_TOKEN secret: an npm token that can publish to the @weftsh
-# scope. Published versions are never overwritten.
+# Authentication: npm trusted publishing (this workflow's GitHub OIDC
+# identity, configured on npmjs.com for Weftsh/sandy and npm.yml). The
+# NPM_TOKEN secret, if present, is a fallback; npm tries OIDC first.
+# Published versions are never overwritten.
 name: npm
 
 on:
@@ -86,9 +88,7 @@ jobs:
           NODE_AUTH_TOKEN: ${{ secrets.NPM_TOKEN }}
           TAG: ${{ steps.version.outputs.tag }}
         run: |
-          if [ -z "$NODE_AUTH_TOKEN" ]; then
-            echo "::error::the NPM_TOKEN secret is not available to this repository"
-            exit 1
-          fi
-          echo "npm user: $(npm whoami)"
+          # Trusted publishing needs npm 11.5.1 or later; Node.js 22 ships npm 10.
+          npm install -g --no-fund --no-audit npm@11.20.0
+          npm --version
           npm publish --provenance --tag "$TAG"

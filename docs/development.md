@@ -132,8 +132,9 @@ node og/render.cjs               # regenerate the social images after editing og
 [packages/sdk](../packages/sdk)) is published to npm with provenance by
 [.github/workflows/npm.yml](../.github/workflows/npm.yml). To release, bump the
 version in `packages/sdk/package.json` and merge to `main`: CI publishes any
-version npm does not have yet, using the `NPM_TOKEN` secret, and skips one it
-already has. Pre-release versions (`0.2.0-beta.1`) go to the `next` dist-tag.
+version npm does not have yet and skips one it already has. It authenticates
+with npm trusted publishing (the workflow's GitHub identity, configured on
+npmjs.com), falling back to an `NPM_TOKEN` secret if one is set. Pre-release versions (`0.2.0-beta.1`) go to the `next` dist-tag.
 Pull requests that touch the package build, test and pack it without
 publishing.
 
