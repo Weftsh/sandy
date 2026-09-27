@@ -18,7 +18,7 @@ weft-awsauth = { path = "../awsauth" }
 anyhow = "1"
 async-compression = { version = "0.4", features = ["tokio", "zstd"] }
 axum = { version = "0.8", default-features = false, features = ["http1", "json", "tokio", "query"] }
-base64 = "0.22"
+base64 = "0.23"
 bytes = "1"
 clap = { version = "4", features = ["derive", "env"] }
 flate2 = "1"
