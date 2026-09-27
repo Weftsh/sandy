@@ -9,7 +9,7 @@
 # The stack's verify-release custom resource accepts a release only if
 # release-manifest.json carries a Sigstore signature whose certificate
 # identity is exactly
-#   https://github.com/weftsh/byoc/.github/workflows/release.yml@refs/tags/v<version>
+#   https://github.com/Weftsh/sandy/.github/workflows/release.yml@refs/tags/v<version>
 # so this file's path and the tag format are part of the trust chain.
 #
 # Repository settings used:

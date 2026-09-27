@@ -7,7 +7,7 @@
  */
 
 /** Repository and workflow whose GitHub Actions OIDC identity signs releases. */
-export const RELEASE_REPOSITORY = "weftsh/byoc";
+export const RELEASE_REPOSITORY = "Weftsh/sandy";
 export const RELEASE_WORKFLOW_PATH = ".github/workflows/release.yml";
 export const GITHUB_ACTIONS_ISSUER = "https://token.actions.githubusercontent.com";
 

@@ -181,7 +181,7 @@ compute exists, the `verify-release` Lambda reads
 verifies the signature with sigstore-js against the Sigstore trusted root that
 the release bundled into the function (no network call to Sigstore). The
 signing certificate must carry exactly the GitHub Actions OIDC identity
-`https://github.com/weftsh/byoc/.github/workflows/release.yml@refs/tags/v<version>`
+`https://github.com/Weftsh/sandy/.github/workflows/release.yml@refs/tags/v<version>`
 (issuer `https://token.actions.githubusercontent.com`) and be logged in Rekor.
 Only then does it compare the manifest with what the stack will run: the host
 AMI for this Region, the control-plane and gateway image digests (images must
@@ -474,7 +474,7 @@ Release infrastructure (outside this repository): per-Region buckets
 `<prefix>-<region>` with public read of `v*/` objects (CloudFormation, Lambda and
 customer stacks read them), versioning and ideally S3 Object Lock; an IAM role
 trusting `token.actions.githubusercontent.com` for
-`repo:weftsh/byoc:environment:release`, allowed to run the Packer build (EC2
+`repo:Weftsh/sandy:environment:release`, allowed to run the Packer build (EC2
 instances, images, snapshots, temporary security groups and key pairs in the
 build Region, `CopyImage` to the others) and to put objects in the release
 buckets; the `release` environment with required reviewers; and a tag ruleset

@@ -75,7 +75,7 @@ describe("Custom::WeftReleaseVerification", () => {
     expect(verify).toHaveBeenCalledOnce();
     const [, payload, identity] = verify.mock.calls[0]!;
     expect(JSON.parse(Buffer.from(payload).toString()).version).toBe("1.2.3");
-    expect(identity.subjectAlternativeName).toBe("https://github.com/weftsh/byoc/.github/workflows/release.yml@refs/tags/v1.2.3");
+    expect(identity.subjectAlternativeName).toBe("https://github.com/Weftsh/sandy/.github/workflows/release.yml@refs/tags/v1.2.3");
     expect(d.getObject).toHaveBeenCalledWith("weft-releases-us-east-1", "v1.2.3/release-manifest.json", expect.any(Number));
     expect(d.functionCodeSha256).toHaveBeenCalledWith("stack-EgressCaFunction-ABC");
     expect(res.data?.Version).toBe("1.2.3");

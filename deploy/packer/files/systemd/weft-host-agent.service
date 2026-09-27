@@ -1,6 +1,6 @@
 [Unit]
 Description=Weft host agent (runs sandboxes as Firecracker microVMs)
-Documentation=https://github.com/weftsh/byoc
+Documentation=https://github.com/Weftsh/sandy
 Wants=network-online.target
 After=network-online.target weft-data-volume.service weft-host-tuning.service
 Requires=weft-data-volume.service weft-host-tuning.service

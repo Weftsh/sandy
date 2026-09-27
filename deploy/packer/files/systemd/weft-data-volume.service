@@ -1,6 +1,6 @@
 [Unit]
 Description=Weft data volume (XFS with reflink) at /var/lib/weft
-Documentation=https://github.com/weftsh/byoc/tree/main/deploy
+Documentation=https://github.com/Weftsh/sandy/tree/main/deploy
 After=local-fs.target
 Before=weft-host-agent.service
 

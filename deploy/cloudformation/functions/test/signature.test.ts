@@ -37,7 +37,7 @@ describe("sigstoreVerifier", () => {
 
   it("rejects the right signature from the wrong identity", () => {
     const releaseWorkflow = {
-      subjectAlternativeName: "https://github.com/weftsh/byoc/.github/workflows/release.yml@refs/tags/v1.2.3",
+      subjectAlternativeName: "https://github.com/Weftsh/sandy/.github/workflows/release.yml@refs/tags/v1.2.3",
       issuer: "https://token.actions.githubusercontent.com",
     };
     expect(() => verifier.verify(bundle, payload, releaseWorkflow)).toThrow(/signature did not verify.*identity/);

@@ -12,7 +12,7 @@ members = [
 version = "0.1.0"
 edition = "2021"
 license = "FSL-1.1-ALv2"
-repository = "https://github.com/weftsh/byoc"
+repository = "https://github.com/Weftsh/sandy"
 rust-version = "1.85"
 
 [workspace.lints.rust]

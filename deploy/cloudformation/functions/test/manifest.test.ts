@@ -17,7 +17,7 @@ const bytes = (o: unknown) => new TextEncoder().encode(JSON.stringify(o));
 describe("releaseSignerIdentity", () => {
   it("pins the repository, workflow and tag", () => {
     expect(releaseSignerIdentity("1.2.3")).toEqual({
-      subjectAlternativeName: "https://github.com/weftsh/byoc/.github/workflows/release.yml@refs/tags/v1.2.3",
+      subjectAlternativeName: "https://github.com/Weftsh/sandy/.github/workflows/release.yml@refs/tags/v1.2.3",
       issuer: "https://token.actions.githubusercontent.com",
     });
   });
