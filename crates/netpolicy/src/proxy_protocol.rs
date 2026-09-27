@@ -31,7 +31,9 @@ pub enum ProxyProtocolError {
     BadSignature,
     #[error("unsupported PROXY protocol version or command {0:#04x}")]
     UnsupportedCommand(u8),
-    #[error("unsupported address family/protocol {0:#04x}; only TCP over IPv4 or IPv6 is accepted")]
+    #[error(
+        "unsupported address family/protocol {0:#04x}; only TCP over IPv4 or IPv6 is accepted"
+    )]
     UnsupportedFamily(u8),
     #[error("PROXY header of {0} bytes exceeds the limit")]
     TooLong(usize),
@@ -168,8 +170,13 @@ impl ProxyHeader {
                 }
                 let id = std::str::from_utf8(value)
                     .map_err(|_| ProxyProtocolError::Malformed("sandbox ID is not UTF-8"))?;
-                if !id.bytes().all(|b| b.is_ascii_alphanumeric() || b == b'-' || b == b'_') {
-                    return Err(ProxyProtocolError::Malformed("sandbox ID has invalid characters"));
+                if !id
+                    .bytes()
+                    .all(|b| b.is_ascii_alphanumeric() || b == b'-' || b == b'_')
+                {
+                    return Err(ProxyProtocolError::Malformed(
+                        "sandbox ID has invalid characters",
+                    ));
                 }
                 sandbox_id = Some(id.to_owned());
             }
@@ -223,7 +230,11 @@ mod tests {
     fn partial_input_asks_for_more() {
         let bytes = header().encode().unwrap();
         for cut in [0, 5, 12, 15, 16, bytes.len() - 1] {
-            assert_eq!(ProxyHeader::decode(&bytes[..cut]).unwrap(), None, "cut at {cut}");
+            assert_eq!(
+                ProxyHeader::decode(&bytes[..cut]).unwrap(),
+                None,
+                "cut at {cut}"
+            );
         }
     }
 
@@ -233,7 +244,10 @@ mod tests {
             ProxyHeader::decode(b"GET / HTTP/1.1\r\n"),
             Err(ProxyProtocolError::BadSignature)
         );
-        assert_eq!(ProxyHeader::decode(b"\x16"), Err(ProxyProtocolError::BadSignature));
+        assert_eq!(
+            ProxyHeader::decode(b"\x16"),
+            Err(ProxyProtocolError::BadSignature)
+        );
     }
 
     #[test]

@@ -4,8 +4,6 @@
 
 use std::fmt;
 use std::process::Stdio;
-#[cfg(test)]
-use std::sync::Mutex;
 
 use tokio::io::AsyncWriteExt;
 use tokio::process::Command;
@@ -77,7 +75,11 @@ impl Runner for SystemRunner {
     async fn run(&self, cmd: &Cmd) -> Result<(), CmdError> {
         let mut child = Command::new(&cmd.program)
             .args(&cmd.args)
-            .stdin(if cmd.stdin.is_some() { Stdio::piped() } else { Stdio::null() })
+            .stdin(if cmd.stdin.is_some() {
+                Stdio::piped()
+            } else {
+                Stdio::null()
+            })
             .stdout(Stdio::null())
             .stderr(Stdio::piped())
             .kill_on_drop(true)
@@ -116,19 +118,4 @@ pub async fn run_all<R: Runner>(runner: &R, plan: &[Cmd]) -> Result<(), CmdError
         runner.run(cmd).await?;
     }
     Ok(())
-}
-
-/// Records commands instead of running them.
-#[cfg(test)]
-#[derive(Debug, Default)]
-pub struct RecordingRunner {
-    pub commands: Mutex<Vec<Cmd>>,
-}
-
-#[cfg(test)]
-impl Runner for RecordingRunner {
-    async fn run(&self, cmd: &Cmd) -> Result<(), CmdError> {
-        self.commands.lock().expect("poisoned").push(cmd.clone());
-        Ok(())
-    }
 }

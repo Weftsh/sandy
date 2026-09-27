@@ -129,9 +129,11 @@ impl HostPattern {
     fn matches_name(&self, name: &str) -> bool {
         match self {
             Self::Exact(h) => h == name,
-            Self::Subdomains(d) => name.len() > d.len() + 1
-                && name.ends_with(d.as_str())
-                && name.as_bytes()[name.len() - d.len() - 1] == b'.',
+            Self::Subdomains(d) => {
+                name.len() > d.len() + 1
+                    && name.ends_with(d.as_str())
+                    && name.as_bytes()[name.len() - d.len() - 1] == b'.'
+            }
             // Single-label names (`localhost`, `metadata`, search-domain
             // shortcuts) are internal by nature; `*` covers public FQDNs only.
             Self::AnyPublic => name.contains('.'),
@@ -361,9 +363,10 @@ impl CompiledPolicy {
                 }
             }
             IpClass::Public => {
-                let any_public = self.rules.iter().any(|r| {
-                    r.allows_port(port) && matches!(r.pattern, HostPattern::AnyPublic)
-                });
+                let any_public = self
+                    .rules
+                    .iter()
+                    .any(|r| r.allows_port(port) && matches!(r.pattern, HostPattern::AnyPublic));
                 if any_public || self.cidr_allows(ip, port) {
                     Decision::Allow
                 } else {
@@ -398,9 +401,9 @@ impl CompiledPolicy {
 
 fn is_valid_header_name(name: &str) -> bool {
     !name.is_empty()
-        && name.bytes().all(|b| {
-            b.is_ascii_alphanumeric() || b"!#$%&'*+-.^_`|~".contains(&b)
-        })
+        && name
+            .bytes()
+            .all(|b| b.is_ascii_alphanumeric() || b"!#$%&'*+-.^_`|~".contains(&b))
 }
 
 fn is_hop_by_hop_or_framing(name: &str) -> bool {
@@ -446,7 +449,10 @@ mod tests {
         assert!(!p.may_resolve("evilapi.github.com"));
         assert!(p.may_resolve("files.pypi.org"));
         assert!(p.may_resolve("a.b.pypi.org"));
-        assert!(!p.may_resolve("pypi.org"), "wildcard matches subdomains only");
+        assert!(
+            !p.may_resolve("pypi.org"),
+            "wildcard matches subdomains only"
+        );
         assert!(!p.may_resolve("notpypi.org"));
         assert!(!p.may_resolve("pypi.org.evil.com"));
         assert!(p.check_name("api.github.com", 443).is_allowed());
@@ -472,12 +478,16 @@ mod tests {
             p.check_resolved("169.254.169.254".parse().unwrap(), 80),
             Decision::Deny(DenyReason::ForbiddenAddress)
         );
-        assert!(p.check_resolved("93.184.215.14".parse().unwrap(), 443).is_allowed());
+        assert!(p
+            .check_resolved("93.184.215.14".parse().unwrap(), 443)
+            .is_allowed());
     }
 
     #[test]
     fn cidr_rules_open_private_ranges_but_never_forbidden_ones() {
-        let p = policy(r#"{"allow":[{"host":"10.20.0.0/16","ports":[5432]},{"host":"169.254.0.0/16"}]}"#);
+        let p = policy(
+            r#"{"allow":[{"host":"10.20.0.0/16","ports":[5432]},{"host":"169.254.0.0/16"}]}"#,
+        );
         assert!(p.check_ip("10.20.1.2".parse().unwrap(), 5432).is_allowed());
         assert!(!p.check_ip("10.20.1.2".parse().unwrap(), 443).is_allowed());
         assert!(!p.check_ip("10.21.1.2".parse().unwrap(), 5432).is_allowed());
@@ -495,7 +505,9 @@ mod tests {
         assert!(p.check_ip("1.1.1.1".parse().unwrap(), 443).is_allowed());
         assert!(!p.check_ip("10.0.0.1".parse().unwrap(), 443).is_allowed());
         assert!(!p.check_ip("127.0.0.1".parse().unwrap(), 443).is_allowed());
-        assert!(!p.check_resolved("192.168.0.1".parse().unwrap(), 443).is_allowed());
+        assert!(!p
+            .check_resolved("192.168.0.1".parse().unwrap(), 443)
+            .is_allowed());
     }
 
     #[test]
@@ -516,10 +528,16 @@ mod tests {
         let bad_hosts = ["*.com", "api.*.com", "", "exa mple.com", "-bad.com", "**"];
         for host in bad_hosts {
             let p = EgressPolicy {
-                allow: vec![AllowRule { host: host.to_string(), ports: vec![] }],
+                allow: vec![AllowRule {
+                    host: host.to_string(),
+                    ports: vec![],
+                }],
                 credentials: vec![],
             };
-            assert!(CompiledPolicy::compile(&p).is_err(), "{host:?} should be rejected");
+            assert!(
+                CompiledPolicy::compile(&p).is_err(),
+                "{host:?} should be rejected"
+            );
         }
         let cred = |header: &str, format: Option<&str>, host: &str| EgressPolicy {
             allow: vec![],
@@ -535,7 +553,9 @@ mod tests {
         assert!(CompiledPolicy::compile(&cred("Transfer-Encoding", None, "a.com")).is_err());
         assert!(CompiledPolicy::compile(&cred("bad header", None, "a.com")).is_err());
         assert!(CompiledPolicy::compile(&cred("x-key", Some("no placeholder"), "a.com")).is_err());
-        assert!(CompiledPolicy::compile(&cred("x-key", Some("{{secret}}\r\nx: y"), "a.com")).is_err());
+        assert!(
+            CompiledPolicy::compile(&cred("x-key", Some("{{secret}}\r\nx: y"), "a.com")).is_err()
+        );
         assert!(CompiledPolicy::compile(&cred("x-key", None, "*.a.com")).is_err());
         assert!(CompiledPolicy::compile(&cred("x-key", None, "a.com")).is_ok());
     }
@@ -558,7 +578,10 @@ mod tests {
             r#"{"credentials":[{"host":"a.com","header":"x","secretId":"1"},{"host":"A.com.","header":"y","secretId":"2"}]}"#,
         )
         .unwrap();
-        assert!(matches!(CompiledPolicy::compile(&p), Err(PolicyError::InvalidCredential { index: 1, .. })));
+        assert!(matches!(
+            CompiledPolicy::compile(&p),
+            Err(PolicyError::InvalidCredential { index: 1, .. })
+        ));
     }
 
     #[test]
@@ -576,7 +599,10 @@ mod tests {
     fn caps_rule_count() {
         let p = EgressPolicy {
             allow: (0..=MAX_RULES)
-                .map(|i| AllowRule { host: format!("h{i}.example.com"), ports: vec![] })
+                .map(|i| AllowRule {
+                    host: format!("h{i}.example.com"),
+                    ports: vec![],
+                })
                 .collect(),
             credentials: vec![],
         };

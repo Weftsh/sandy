@@ -23,7 +23,10 @@ pub enum RuntimeError {
     #[error("{0}")]
     Failed(String),
     #[error("not supported by the {runtime} runtime: {what}")]
-    Unsupported { runtime: &'static str, what: &'static str },
+    Unsupported {
+        runtime: &'static str,
+        what: &'static str,
+    },
     #[error(transparent)]
     Cmd(#[from] crate::cmd::CmdError),
     #[error("i/o: {0}")]
@@ -122,7 +125,10 @@ impl Runtime {
     ) -> Result<()> {
         match self {
             Runtime::Namespace(r) => r.finish_template(rootfs_dir, out_dir).await,
-            Runtime::Firecracker(r) => r.finish_template(req, build_id, rootfs_dir, out_dir, slot, log).await,
+            Runtime::Firecracker(r) => {
+                r.finish_template(req, build_id, rootfs_dir, out_dir, slot, log)
+                    .await
+            }
         }
     }
 
@@ -137,16 +143,25 @@ impl Runtime {
         match (self, handle) {
             (Runtime::Namespace(r), Handle::Namespace(h)) => r.stop(h).await,
             (Runtime::Firecracker(r), Handle::Firecracker(h)) => r.stop(h).await,
-            _ => Err(RuntimeError::Failed("handle belongs to another runtime".into())),
+            _ => Err(RuntimeError::Failed(
+                "handle belongs to another runtime".into(),
+            )),
         }
     }
 
     /// Pauses a guest. `work_dir` is where snapshot files may be written.
     pub async fn pause(&self, handle: Handle, work_dir: &Path) -> Result<Paused> {
         match (self, handle) {
-            (Runtime::Namespace(r), Handle::Namespace(h)) => r.freeze(&h).await.map(|()| Paused::Frozen(Handle::Namespace(h))),
-            (Runtime::Firecracker(r), Handle::Firecracker(h)) => r.pause(h, work_dir).await.map(Paused::Snapshot),
-            _ => Err(RuntimeError::Failed("handle belongs to another runtime".into())),
+            (Runtime::Namespace(r), Handle::Namespace(h)) => r
+                .freeze(&h)
+                .await
+                .map(|()| Paused::Frozen(Handle::Namespace(h))),
+            (Runtime::Firecracker(r), Handle::Firecracker(h)) => {
+                r.pause(h, work_dir).await.map(Paused::Snapshot)
+            }
+            _ => Err(RuntimeError::Failed(
+                "handle belongs to another runtime".into(),
+            )),
         }
     }
 
@@ -154,7 +169,10 @@ impl Runtime {
     pub async fn thaw(&self, handle: &Handle) -> Result<()> {
         match (self, handle) {
             (Runtime::Namespace(r), Handle::Namespace(h)) => r.thaw(h).await,
-            _ => Err(RuntimeError::Unsupported { runtime: self.name(), what: "thawing a frozen guest" }),
+            _ => Err(RuntimeError::Unsupported {
+                runtime: self.name(),
+                what: "thawing a frozen guest",
+            }),
         }
     }
 }

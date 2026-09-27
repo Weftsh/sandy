@@ -20,7 +20,9 @@ pub fn generate(private_ip: &str) -> anyhow::Result<HostIdentity> {
     if let Ok(ip) = private_ip.parse::<std::net::IpAddr>() {
         params.subject_alt_names.push(rcgen::SanType::IpAddress(ip));
     }
-    params.distinguished_name.push(rcgen::DnType::CommonName, "weft-host-agent");
+    params
+        .distinguished_name
+        .push(rcgen::DnType::CommonName, "weft-host-agent");
     let now = time::OffsetDateTime::now_utc();
     params.not_before = now - time::Duration::hours(1);
     params.not_after = now + time::Duration::days(365);
@@ -35,7 +37,10 @@ pub fn generate(private_ip: &str) -> anyhow::Result<HostIdentity> {
         .with_no_client_auth()
         .with_single_cert(vec![der], key_der)?;
     server_config.alpn_protocols = vec![b"http/1.1".to_vec()];
-    Ok(HostIdentity { cert_pem, server_config: Arc::new(server_config) })
+    Ok(HostIdentity {
+        cert_pem,
+        server_config: Arc::new(server_config),
+    })
 }
 
 /// Constant-time comparison for bearer tokens.

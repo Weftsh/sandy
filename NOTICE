@@ -19,6 +19,19 @@ Licensed under the Apache License, Version 2.0.
 Source: https://github.com/firecracker-microvm/firecracker
 Host AMIs ship unmodified upstream release binaries.
 
+guest/kernel/microvm-kernel-ci-x86_64-6.18.config is Firecracker's x86_64
+guest kernel configuration, vendored unmodified (see guest/kernel/NOTICE).
+
+--------------------------------------------------------------------------
+Linux kernel (guest kernel)
+Licensed under the GNU General Public License, version 2 only, with the
+Linux syscall note.
+Source: https://www.kernel.org/ (the release pinned in guest/kernel/VERSION)
+Host AMIs ship a guest kernel built by guest/kernel/build.sh from the
+unmodified upstream release with the configuration in guest/kernel/. That
+script, the pinned release and the configuration are the complete
+corresponding source.
+
 --------------------------------------------------------------------------
 "E2B" is a trademark of its owner. Weft Sandboxes is an independent project,
 is not affiliated with or endorsed by E2B, and uses the name only to describe

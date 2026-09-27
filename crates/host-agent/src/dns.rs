@@ -55,7 +55,10 @@ impl Resolver {
         };
         // One question per query is all real resolvers send; refuse anything else.
         let allowed = msg.queries.len() == 1
-            && msg.queries.iter().all(|q| entry.policy.may_resolve(&q.name().to_ascii()));
+            && msg
+                .queries
+                .iter()
+                .all(|q| entry.policy.may_resolve(&q.name().to_ascii()));
         if allowed {
             Verdict::Forward
         } else {
@@ -100,10 +103,14 @@ impl Resolver {
 
     pub async fn serve_tcp(self: Arc<Self>, listener: TcpListener) {
         loop {
-            let Ok((stream, peer)) = listener.accept().await else { continue };
+            let Ok((stream, peer)) = listener.accept().await else {
+                continue;
+            };
             let this = self.clone();
             tokio::spawn(async move {
-                let _ = tokio::time::timeout(Duration::from_secs(30), this.handle_tcp(stream, peer)).await;
+                let _ =
+                    tokio::time::timeout(Duration::from_secs(30), this.handle_tcp(stream, peer))
+                        .await;
             });
         }
     }
@@ -130,7 +137,11 @@ impl Resolver {
     }
 
     async fn forward_udp(&self, query: &[u8]) -> std::io::Result<Vec<u8>> {
-        let bind: SocketAddr = if self.upstream.is_ipv4() { "0.0.0.0:0".parse().unwrap() } else { "[::]:0".parse().unwrap() };
+        let bind: SocketAddr = if self.upstream.is_ipv4() {
+            "0.0.0.0:0".parse().unwrap()
+        } else {
+            "[::]:0".parse().unwrap()
+        };
         let sock = UdpSocket::bind(bind).await?;
         sock.connect(self.upstream).await?;
         sock.send(query).await?;
@@ -154,7 +165,8 @@ impl Resolver {
         s.write_all(query).await?;
         let len = tokio::time::timeout(UPSTREAM_TIMEOUT, s.read_u16())
             .await
-            .map_err(|_| std::io::Error::new(std::io::ErrorKind::TimedOut, "upstream timeout"))?? as usize;
+            .map_err(|_| std::io::Error::new(std::io::ErrorKind::TimedOut, "upstream timeout"))??
+            as usize;
         let mut buf = vec![0u8; len];
         s.read_exact(&mut buf).await?;
         Ok(buf)
@@ -195,16 +207,30 @@ mod tests {
     fn query(name: &str) -> Vec<u8> {
         let mut m = Message::new(4242, MessageType::Query, hickory_proto::op::OpCode::Query);
         m.metadata.recursion_desired = true;
-        m.queries.push(Query::query(Name::from_str(name).unwrap(), RecordType::A));
+        m.queries
+            .push(Query::query(Name::from_str(name).unwrap(), RecordType::A));
         m.to_vec().unwrap()
     }
 
     fn setup() -> (Resolver, Slot) {
-        let net = NetConfig { pool: "10.200.0.0/16".parse().unwrap(), dns_port: 1, egress_port: 2 };
+        let net = NetConfig {
+            pool: "10.200.0.0/16".parse().unwrap(),
+            dns_port: 1,
+            egress_port: 2,
+        };
         let slots = Arc::new(SlotTable::new(net, 4));
         let slot = slots.reserve().unwrap();
-        let policy: EgressPolicy = serde_json::from_str(r#"{"allow":[{"host":"pypi.org"},{"host":"*.pythonhosted.org"}]}"#).unwrap();
-        slots.occupy(slot.index, SlotEntry { sandbox_id: "sb".into(), policy: Arc::new(CompiledPolicy::compile(&policy).unwrap()) });
+        let policy: EgressPolicy = serde_json::from_str(
+            r#"{"allow":[{"host":"pypi.org"},{"host":"*.pythonhosted.org"}]}"#,
+        )
+        .unwrap();
+        slots.occupy(
+            slot.index,
+            SlotEntry {
+                sandbox_id: "sb".into(),
+                policy: Arc::new(CompiledPolicy::compile(&policy).unwrap()),
+            },
+        );
         (Resolver::new(slots, "127.0.0.1:53".parse().unwrap()), slot)
     }
 
@@ -217,7 +243,10 @@ mod tests {
         let (r, slot) = setup();
         let src = IpAddr::V4(slot.ns_ip);
         assert_eq!(r.decide(src, &query("pypi.org.")), Verdict::Forward);
-        assert_eq!(r.decide(src, &query("files.pythonhosted.org.")), Verdict::Forward);
+        assert_eq!(
+            r.decide(src, &query("files.pythonhosted.org.")),
+            Verdict::Forward
+        );
         match r.decide(src, &query("evil.example.")) {
             Verdict::Answer(b) => {
                 assert_eq!(rcode(&b), ResponseCode::NXDomain);
@@ -234,13 +263,18 @@ mod tests {
             Verdict::Answer(b) => assert_eq!(rcode(&b), ResponseCode::Refused),
             other => panic!("{other:?}"),
         }
-        assert_eq!(r.decide(IpAddr::V4(slot.ns_ip), b"\x00\x01garbage"), Verdict::Drop);
+        assert_eq!(
+            r.decide(IpAddr::V4(slot.ns_ip), b"\x00\x01garbage"),
+            Verdict::Drop
+        );
     }
 
     #[test]
     fn parses_resolv_conf() {
         assert_eq!(
-            upstream_from_resolv_conf("# c\nsearch x\nnameserver 169.254.169.253\nnameserver 8.8.8.8\n"),
+            upstream_from_resolv_conf(
+                "# c\nsearch x\nnameserver 169.254.169.253\nnameserver 8.8.8.8\n"
+            ),
             Some("169.254.169.253:53".parse().unwrap())
         );
         assert_eq!(upstream_from_resolv_conf("search x\n"), None);

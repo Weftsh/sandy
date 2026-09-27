@@ -1,0 +1,16 @@
+# Pinned inputs of the Weft guest kernel build (guest/kernel/build.sh).
+#
+# Upstream Linux longterm release from kernel.org. The hash is the one listed
+# in https://cdn.kernel.org/pub/linux/kernel/v6.x/sha256sums.asc, which is
+# signed by the kernel.org checksum autosigner
+# (B8868C80BA62A1FFFAF5FDA9632D3A06589DA6B1); the signature was checked when
+# this pin was set.
+LINUX_VERSION=6.18.54
+LINUX_SHA256=9df30b02dd8102bbd0be52556288ef6889ddbe7f1ddb96fbf847d0becf3eacac
+#
+# Firecracker release the host runtime targets, and the guest configuration
+# vendored from that release's resources/guest_configs/ (Apache-2.0, see
+# NOTICE in this directory). The hash detects accidental edits.
+FIRECRACKER_VERSION=v1.17.0
+FC_CONFIG=microvm-kernel-ci-x86_64-6.18.config
+FC_CONFIG_SHA256=ba22401a0c7292a4c024ebcd10a562d4a1f1bfd2faed671406d3b159c0cf5215

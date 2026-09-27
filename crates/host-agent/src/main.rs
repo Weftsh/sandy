@@ -43,7 +43,11 @@ pub const VERSION: &str = env!("CARGO_PKG_VERSION");
 pub const ENVD_VERSION: &str = "0.9.0";
 
 #[derive(Parser)]
-#[command(name = "weft-host-agent", version, about = "Runs Weft sandboxes on one host")]
+#[command(
+    name = "weft-host-agent",
+    version,
+    about = "Runs Weft sandboxes on one host"
+)]
 struct Cli {
     #[command(subcommand)]
     command: Command,
@@ -54,7 +58,11 @@ enum Command {
     /// Run the agent.
     Run(Box<RunArgs>),
     #[command(hide = true)]
-    UnpackLayer { root: PathBuf, layer: PathBuf, media_type: String },
+    UnpackLayer {
+        root: PathBuf,
+        layer: PathBuf,
+        media_type: String,
+    },
     #[command(hide = true)]
     EnterCgroup {
         procs_file: String,
@@ -128,7 +136,11 @@ struct RunArgs {
     #[arg(long, env = "WEFT_MAX_SANDBOXES", default_value_t = 64)]
     max_sandboxes: u32,
 
-    #[arg(long, env = "WEFT_FIRECRACKER_BIN", default_value = "/usr/local/bin/firecracker")]
+    #[arg(
+        long,
+        env = "WEFT_FIRECRACKER_BIN",
+        default_value = "/usr/local/bin/firecracker"
+    )]
     firecracker_bin: PathBuf,
     #[arg(long, env = "WEFT_JAILER_BIN", default_value = "/usr/local/bin/jailer")]
     jailer_bin: PathBuf,
@@ -138,19 +150,30 @@ struct RunArgs {
     chroot_base: PathBuf,
     #[arg(long, env = "WEFT_UID_BASE", default_value_t = 200_000)]
     uid_base: u32,
+    /// Firecracker CPU template (JSON) applied to template builds, so every
+    /// host that restores a snapshot presents the same CPU features.
+    #[arg(long, env = "WEFT_CPU_TEMPLATE")]
+    cpu_template: Option<PathBuf>,
 }
 
 fn main() -> ExitCode {
     let cli = Cli::parse();
     match cli.command {
-        Command::UnpackLayer { root, layer, media_type } => match rootfs::unpack_layer_in_chroot(&root, &layer, &media_type) {
+        Command::UnpackLayer {
+            root,
+            layer,
+            media_type,
+        } => match rootfs::unpack_layer_in_chroot(&root, &layer, &media_type) {
             Ok(()) => ExitCode::SUCCESS,
             Err(e) => {
                 eprintln!("{e}");
                 ExitCode::FAILURE
             }
         },
-        Command::EnterCgroup { procs_file, command } => {
+        Command::EnterCgroup {
+            procs_file,
+            command,
+        } => {
             let err = runtime::namespace::enter_cgroup_and_exec(&procs_file, &command);
             eprintln!("enter-cgroup: {err}");
             ExitCode::FAILURE
@@ -159,7 +182,8 @@ fn main() -> ExitCode {
             tracing_subscriber::fmt()
                 .json()
                 .with_env_filter(
-                    tracing_subscriber::EnvFilter::try_from_default_env().unwrap_or_else(|_| "info".into()),
+                    tracing_subscriber::EnvFilter::try_from_default_env()
+                        .unwrap_or_else(|_| "info".into()),
                 )
                 .init();
             let rt = tokio::runtime::Runtime::new().expect("tokio runtime");
@@ -178,11 +202,23 @@ async fn run(args: RunArgs) -> anyhow::Result<()> {
     // One agent per host: a second one would tear down the first one's
     // namespaces and iptables rules.
     std::fs::create_dir_all(&args.data_dir)?;
-    let lock_file = std::fs::OpenOptions::new().create(true).truncate(false).write(true).open(args.data_dir.join(".agent.lock"))?;
+    let lock_file = std::fs::OpenOptions::new()
+        .create(true)
+        .truncate(false)
+        .write(true)
+        .open(args.data_dir.join(".agent.lock"))?;
     let _lock = nix::fcntl::Flock::lock(lock_file, nix::fcntl::FlockArg::LockExclusiveNonblock)
-        .map_err(|(_, e)| anyhow::anyhow!("another host agent is running with data dir {} ({e})", args.data_dir.display()))?;
+        .map_err(|(_, e)| {
+            anyhow::anyhow!(
+                "another host agent is running with data dir {} ({e})",
+                args.data_dir.display()
+            )
+        })?;
     let net = NetConfig {
-        pool: args.slot_pool.parse().map_err(|e: String| anyhow::anyhow!("--slot-pool: {e}"))?,
+        pool: args
+            .slot_pool
+            .parse()
+            .map_err(|e: String| anyhow::anyhow!("--slot-pool: {e}"))?,
         dns_port: args.dns_port,
         egress_port: args.egress_port,
     };
@@ -194,27 +230,35 @@ async fn run(args: RunArgs) -> anyhow::Result<()> {
             );
             Runtime::Namespace(NamespaceRuntime::new(args.data_dir.clone()))
         }
-        RuntimeKind::Firecracker => Runtime::Firecracker(FirecrackerRuntime::new(FirecrackerConfig {
-            firecracker_bin: args.firecracker_bin.clone(),
-            jailer_bin: args.jailer_bin.clone(),
-            kernel: args.kernel.clone(),
-            chroot_base: args.chroot_base.clone(),
-            data_dir: args.data_dir.clone(),
-            uid_base: args.uid_base,
-        })?),
+        RuntimeKind::Firecracker => {
+            Runtime::Firecracker(FirecrackerRuntime::new(FirecrackerConfig {
+                firecracker_bin: args.firecracker_bin.clone(),
+                jailer_bin: args.jailer_bin.clone(),
+                kernel: args.kernel.clone(),
+                chroot_base: args.chroot_base.clone(),
+                data_dir: args.data_dir.clone(),
+                uid_base: args.uid_base,
+                cpu_template: args.cpu_template.clone(),
+                ..Default::default()
+            })?)
+        }
     };
     let auth = match args.auth {
         AuthKind::AwsIam => weft_awsauth::InternalAuth::AwsIam(
             weft_awsauth::AwsIamSigner::from_default_chain(&args.region, &args.server_id).await?,
         ),
         AuthKind::DevToken => weft_awsauth::InternalAuth::DevToken(
-            args.dev_token.clone().ok_or_else(|| anyhow::anyhow!("--dev-token is required with --auth dev-token"))?,
+            args.dev_token
+                .clone()
+                .ok_or_else(|| anyhow::anyhow!("--dev-token is required with --auth dev-token"))?,
         ),
     };
 
     let capacity = Capacity {
         max_sandboxes: args.max_sandboxes,
-        vcpus: std::thread::available_parallelism().map(|n| n.get() as u32).unwrap_or(1),
+        vcpus: std::thread::available_parallelism()
+            .map(|n| n.get() as u32)
+            .unwrap_or(1),
         memory_mib: memory_mib().unwrap_or(0),
     };
     let slots = Arc::new(SlotTable::new(net.clone(), args.max_sandboxes));
@@ -236,22 +280,46 @@ async fn run(args: RunArgs) -> anyhow::Result<()> {
 
     let upstream = match args.dns_upstream {
         Some(a) => a,
-        None => dns::upstream_from_resolv_conf(&std::fs::read_to_string("/etc/resolv.conf").unwrap_or_default())
-            .ok_or_else(|| anyhow::anyhow!("no nameserver in /etc/resolv.conf; set --dns-upstream"))?,
+        None => dns::upstream_from_resolv_conf(
+            &std::fs::read_to_string("/etc/resolv.conf").unwrap_or_default(),
+        )
+        .ok_or_else(|| anyhow::anyhow!("no nameserver in /etc/resolv.conf; set --dns-upstream"))?,
     };
     let resolver = Arc::new(dns::Resolver::new(slots.clone(), upstream));
     let dns_addr = SocketAddr::from(([0, 0, 0, 0], args.dns_port));
-    tokio::spawn(resolver.clone().serve_udp(tokio::net::UdpSocket::bind(dns_addr).await?));
+    tokio::spawn(
+        resolver
+            .clone()
+            .serve_udp(tokio::net::UdpSocket::bind(dns_addr).await?),
+    );
     tokio::spawn(resolver.serve_tcp(tokio::net::TcpListener::bind(dns_addr).await?));
 
-    let forwarder = Arc::new(egress::Forwarder::new(slots.clone(), args.egress_gateway.clone()));
-    tokio::spawn(forwarder.serve(tokio::net::TcpListener::bind(SocketAddr::from(([0, 0, 0, 0], args.egress_port))).await?));
+    let forwarder = Arc::new(egress::Forwarder::new(
+        slots.clone(),
+        args.egress_gateway.clone(),
+    ));
+    tokio::spawn(forwarder.serve(
+        tokio::net::TcpListener::bind(SocketAddr::from(([0, 0, 0, 0], args.egress_port))).await?,
+    ));
 
-    let tunnel = Arc::new(tunnel::Tunnel { manager: manager.clone(), token: token.clone(), tls: identity.server_config.clone() });
+    let tunnel = Arc::new(tunnel::Tunnel {
+        manager: manager.clone(),
+        token: token.clone(),
+        tls: identity.server_config.clone(),
+    });
     tokio::spawn(tunnel.serve(tokio::net::TcpListener::bind(args.tunnel_listen).await?));
 
-    let app = api::router(api::AppState { manager: manager.clone(), token: token.clone(), capacity: capacity.clone(), version: VERSION });
-    tokio::spawn(api::serve_tls(tokio::net::TcpListener::bind(args.api_listen).await?, identity.server_config.clone(), app));
+    let app = api::router(api::AppState {
+        manager: manager.clone(),
+        token: token.clone(),
+        capacity: capacity.clone(),
+        version: VERSION,
+    });
+    tokio::spawn(api::serve_tls(
+        tokio::net::TcpListener::bind(args.api_listen).await?,
+        identity.server_config.clone(),
+        app,
+    ));
 
     let registration = register::Registration {
         control_plane_url: args.control_plane_url.clone(),
@@ -279,7 +347,13 @@ async fn run(args: RunArgs) -> anyhow::Result<()> {
 
 fn memory_mib() -> Option<u64> {
     let meminfo = std::fs::read_to_string("/proc/meminfo").ok()?;
-    let kb: u64 = meminfo.lines().find(|l| l.starts_with("MemTotal:"))?.split_whitespace().nth(1)?.parse().ok()?;
+    let kb: u64 = meminfo
+        .lines()
+        .find(|l| l.starts_with("MemTotal:"))?
+        .split_whitespace()
+        .nth(1)?
+        .parse()
+        .ok()?;
     Some(kb / 1024)
 }
 
@@ -288,6 +362,8 @@ mod tests {
     #[test]
     fn envd_version_matches_the_pinned_build() {
         let pinned = include_str!("../../../guest/envd/VERSION");
-        assert!(pinned.lines().any(|l| l == format!("ENVD_VERSION={}", super::ENVD_VERSION)));
+        assert!(pinned
+            .lines()
+            .any(|l| l == format!("ENVD_VERSION={}", super::ENVD_VERSION)));
     }
 }

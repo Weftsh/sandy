@@ -31,7 +31,11 @@ pub struct Forwarder {
 
 impl Forwarder {
     pub fn new(slots: Arc<SlotTable>, gateway: String) -> Self {
-        Self { slots, gateway, open: dashmap_lite::Counters::default() }
+        Self {
+            slots,
+            gateway,
+            open: dashmap_lite::Counters::default(),
+        }
     }
 
     pub async fn serve(self: Arc<Self>, listener: TcpListener) {
@@ -62,7 +66,10 @@ impl Forwarder {
             return Ok(());
         };
         let original = original_destination(&client)?;
-        let guard = match self.open.acquire(&entry.sandbox_id, MAX_CONNECTIONS_PER_SANDBOX) {
+        let guard = match self
+            .open
+            .acquire(&entry.sandbox_id, MAX_CONNECTIONS_PER_SANDBOX)
+        {
             Some(g) => g,
             None => {
                 tracing::warn!(sandbox = %entry.sandbox_id, "egress connection limit reached");
@@ -92,7 +99,12 @@ impl Forwarder {
             match tokio::time::timeout(Duration::from_secs(5), TcpStream::connect(addr)).await {
                 Ok(Ok(s)) => return Ok(s),
                 Ok(Err(e)) => last = e,
-                Err(_) => last = std::io::Error::new(std::io::ErrorKind::TimedOut, "egress gateway connect timed out"),
+                Err(_) => {
+                    last = std::io::Error::new(
+                        std::io::ErrorKind::TimedOut,
+                        "egress gateway connect timed out",
+                    )
+                }
             }
         }
         Err(last)
@@ -101,8 +113,12 @@ impl Forwarder {
 
 /// The destination a redirected connection was originally addressed to.
 fn original_destination(stream: &TcpStream) -> std::io::Result<SocketAddrV4> {
-    let sa = nix::sys::socket::getsockopt(stream, nix::sys::socket::sockopt::OriginalDst).map_err(std::io::Error::from)?;
-    Ok(SocketAddrV4::new(u32::from_be(sa.sin_addr.s_addr).into(), u16::from_be(sa.sin_port)))
+    let sa = nix::sys::socket::getsockopt(stream, nix::sys::socket::sockopt::OriginalDst)
+        .map_err(std::io::Error::from)?;
+    Ok(SocketAddrV4::new(
+        u32::from_be(sa.sin_addr.s_addr).into(),
+        u16::from_be(sa.sin_port),
+    ))
 }
 
 /// Per-sandbox connection counters without an external concurrent map.

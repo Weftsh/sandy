@@ -21,7 +21,10 @@ pub fn prepare(cfg: &Config) -> io::Result<()> {
         eprintln!("weft-guest-init: sethostname: {err}");
     }
     if let Some(dns) = &cfg.dns {
-        write_if_possible("/etc/resolv.conf", &format!("nameserver {dns}\noptions edns0\n"));
+        write_if_possible(
+            "/etc/resolv.conf",
+            &format!("nameserver {dns}\noptions edns0\n"),
+        );
     }
     ensure_hosts(&cfg.hostname);
     Ok(())
@@ -31,9 +34,21 @@ fn mount_vm() -> io::Result<()> {
     let nosuid_nodev_noexec = MsFlags::MS_NOSUID | MsFlags::MS_NODEV | MsFlags::MS_NOEXEC;
     mount_fs("proc", "/proc", "proc", nosuid_nodev_noexec, None)?;
     mount_fs("sysfs", "/sys", "sysfs", nosuid_nodev_noexec, None)?;
-    mount_fs("devtmpfs", "/dev", "devtmpfs", MsFlags::MS_NOSUID, Some("mode=0755"))?;
+    mount_fs(
+        "devtmpfs",
+        "/dev",
+        "devtmpfs",
+        MsFlags::MS_NOSUID,
+        Some("mode=0755"),
+    )?;
     mount_common()?;
-    mount_fs("cgroup2", "/sys/fs/cgroup", "cgroup2", nosuid_nodev_noexec, None)
+    mount_fs(
+        "cgroup2",
+        "/sys/fs/cgroup",
+        "cgroup2",
+        nosuid_nodev_noexec,
+        None,
+    )
 }
 
 /// In the development runtime there is no devtmpfs: build a minimal /dev.
@@ -41,10 +56,22 @@ fn mount_namespace() -> io::Result<()> {
     let nosuid_nodev_noexec = MsFlags::MS_NOSUID | MsFlags::MS_NODEV | MsFlags::MS_NOEXEC;
     mount_fs("proc", "/proc", "proc", nosuid_nodev_noexec, None)?;
     // sysfs is read-only and optional: some hosts refuse it in a child namespace.
-    if let Err(err) = mount_fs("sysfs", "/sys", "sysfs", nosuid_nodev_noexec | MsFlags::MS_RDONLY, None) {
+    if let Err(err) = mount_fs(
+        "sysfs",
+        "/sys",
+        "sysfs",
+        nosuid_nodev_noexec | MsFlags::MS_RDONLY,
+        None,
+    ) {
         eprintln!("weft-guest-init: mounting /sys: {err}");
     }
-    mount_fs("tmpfs", "/dev", "tmpfs", MsFlags::MS_NOSUID, Some("mode=0755,size=65536k"))?;
+    mount_fs(
+        "tmpfs",
+        "/dev",
+        "tmpfs",
+        MsFlags::MS_NOSUID,
+        Some("mode=0755,size=65536k"),
+    )?;
     let rw = FileMode::from_bits_truncate(0o666);
     for (name, major, minor) in [
         ("null", 1, 3),
@@ -82,8 +109,20 @@ fn mount_common() -> io::Result<()> {
     if ptmx.symlink_metadata().is_err() {
         std::os::unix::fs::symlink("pts/ptmx", ptmx)?;
     }
-    mount_fs("tmpfs", "/dev/shm", "tmpfs", MsFlags::MS_NOSUID | MsFlags::MS_NODEV, Some("mode=1777"))?;
-    mount_fs("tmpfs", "/run", "tmpfs", MsFlags::MS_NOSUID | MsFlags::MS_NODEV, Some("mode=0755"))?;
+    mount_fs(
+        "tmpfs",
+        "/dev/shm",
+        "tmpfs",
+        MsFlags::MS_NOSUID | MsFlags::MS_NODEV,
+        Some("mode=1777"),
+    )?;
+    mount_fs(
+        "tmpfs",
+        "/run",
+        "tmpfs",
+        MsFlags::MS_NOSUID | MsFlags::MS_NODEV,
+        Some("mode=0755"),
+    )?;
     Ok(())
 }
 
@@ -95,15 +134,17 @@ fn mount_fs(
     data: Option<&str>,
 ) -> io::Result<()> {
     fs::create_dir_all(target)?;
-    mount(Some(source), target, Some(fstype), flags, data).map_err(|err| {
-        io::Error::other(format!("mount {fstype} on {target}: {err}"))
-    })
+    mount(Some(source), target, Some(fstype), flags, data)
+        .map_err(|err| io::Error::other(format!("mount {fstype} on {target}: {err}")))
 }
 
 fn write_if_possible(path: &str, contents: &str) {
     // /etc/resolv.conf is often a dangling symlink into /run in container
     // images. Replace it with a regular file.
-    if fs::symlink_metadata(path).map(|m| m.file_type().is_symlink()).unwrap_or(false) {
+    if fs::symlink_metadata(path)
+        .map(|m| m.file_type().is_symlink())
+        .unwrap_or(false)
+    {
         let _ = fs::remove_file(path);
     }
     if let Err(err) = fs::write(path, contents) {
@@ -114,10 +155,16 @@ fn write_if_possible(path: &str, contents: &str) {
 fn ensure_hosts(hostname: &str) {
     let existing = fs::read_to_string("/etc/hosts").unwrap_or_default();
     let mut out = String::new();
-    if !existing.lines().any(|l| l.split_whitespace().skip(1).any(|h| h == "localhost")) {
+    if !existing
+        .lines()
+        .any(|l| l.split_whitespace().skip(1).any(|h| h == "localhost"))
+    {
         out.push_str("127.0.0.1\tlocalhost\n::1\tlocalhost ip6-localhost ip6-loopback\n");
     }
-    if !existing.lines().any(|l| l.split_whitespace().skip(1).any(|h| h == hostname)) {
+    if !existing
+        .lines()
+        .any(|l| l.split_whitespace().skip(1).any(|h| h == hostname))
+    {
         out.push_str(&format!("127.0.1.1\t{hostname}\n"));
     }
     if !out.is_empty() {

@@ -53,6 +53,8 @@ export interface LicenseServiceOptions {
   extraPublicKeys: Record<string, string>;
   accountId?: () => Promise<string | undefined>;
   fetch?: typeof fetch;
+  /** Wait between check retries; injectable for tests. */
+  sleep?: (ms: number) => Promise<void>;
   licenseManager?: Pick<LicenseManagerClient, "send">;
 }
 
@@ -158,7 +160,7 @@ export class LicenseService {
       const usage = await this.usage();
       const outcome = await sendLicenseCheck(
         { keyId: verified.license.lid, version: this.opts.version, region: this.opts.region, peakConcurrent: usage.peakSinceCheck },
-        { endpoint: this.opts.endpoint, fetch: this.opts.fetch },
+        { endpoint: this.opts.endpoint, fetch: this.opts.fetch, sleep: this.opts.sleep },
       );
       if (outcome.ok) {
         state.lastCheckAt = outcome.at.toISOString();

@@ -110,7 +110,10 @@ pub enum UploadTarget {
     #[serde(rename_all = "camelCase")]
     Put { url: String },
     #[serde(rename_all = "camelCase")]
-    Multipart { part_size: u64, part_urls: Vec<String> },
+    Multipart {
+        part_size: u64,
+        part_urls: Vec<String>,
+    },
 }
 
 #[derive(Clone, Debug, Serialize, Deserialize, PartialEq, Eq)]
@@ -316,7 +319,9 @@ mod tests {
         let req: StartSandboxRequest = serde_json::from_str(json).unwrap();
         assert_eq!(req.resume, Some(ResumeSource::Local));
         assert_eq!(req.egress.allow.len(), 1);
-        assert!(serde_json::from_str::<StartSandboxRequest>(r#"{"teamId":"t","bogus":1}"#).is_err());
+        assert!(
+            serde_json::from_str::<StartSandboxRequest>(r#"{"teamId":"t","bogus":1}"#).is_err()
+        );
     }
 
     #[test]
@@ -327,7 +332,10 @@ mod tests {
         .unwrap();
         assert_eq!(
             t,
-            UploadTarget::Multipart { part_size: 268_435_456, part_urls: vec!["https://a".into(), "https://b".into()] }
+            UploadTarget::Multipart {
+                part_size: 268_435_456,
+                part_urls: vec!["https://a".into(), "https://b".into()]
+            }
         );
         let r = serde_json::to_value(PauseResult::Local).unwrap();
         assert_eq!(r, serde_json::json!({"kind":"local"}));

@@ -1,0 +1,19 @@
+{
+  "name": "@weftsh/compat-tests",
+  "version": "0.1.0",
+  "private": true,
+  "description": "E2B SDK compatibility suite for Weft Sandboxes: the unmodified JS and Python SDKs against a running stack",
+  "license": "Apache-2.0",
+  "type": "module",
+  "scripts": {
+    "test": "vitest run",
+    "test:js": "vitest run",
+    "test:python": "cd python && pytest -q"
+  },
+  "devDependencies": {
+    "@types/node": "^22.20.4",
+    "e2b": "2.51.0",
+    "typescript": "~6.0.3",
+    "vitest": "^4.1.11"
+  }
+}

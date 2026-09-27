@@ -54,7 +54,11 @@ impl Config {
                 "weft.dns" => cfg.dns = Some(value.to_owned()),
                 "weft.envd" => cfg.envd_path = value.to_owned(),
                 "weft.envd_args" => {
-                    cfg.envd_args = value.split(',').filter(|s| !s.is_empty()).map(str::to_owned).collect()
+                    cfg.envd_args = value
+                        .split(',')
+                        .filter(|s| !s.is_empty())
+                        .map(str::to_owned)
+                        .collect()
                 }
                 _ => {}
             }
@@ -140,7 +144,14 @@ mod tests {
     #[test]
     fn flags_override_kernel_parameters() {
         let cfg = Config::from_sources(
-            &s(&["--mode", "namespace", "--hostname", "abc", "--envd-arg", "-isnotfc"]),
+            &s(&[
+                "--mode",
+                "namespace",
+                "--hostname",
+                "abc",
+                "--envd-arg",
+                "-isnotfc",
+            ]),
             "weft.hostname=zzz",
         )
         .unwrap();

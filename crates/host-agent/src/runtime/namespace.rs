@@ -45,11 +45,15 @@ impl Freezer {
     fn detect() -> Self {
         let v2 = Path::new("/sys/fs/cgroup/cgroup.controllers");
         if v2.exists() {
-            return Freezer::V2 { root: PathBuf::from("/sys/fs/cgroup/weft") };
+            return Freezer::V2 {
+                root: PathBuf::from("/sys/fs/cgroup/weft"),
+            };
         }
         let v1 = Path::new("/sys/fs/cgroup/freezer");
         if v1.join("cgroup.procs").exists() {
-            return Freezer::V1 { root: v1.join("weft") };
+            return Freezer::V1 {
+                root: v1.join("weft"),
+            };
         }
         Freezer::None
     }
@@ -72,7 +76,9 @@ impl NamespaceRuntime {
             Freezer::V2 { root } | Freezer::V1 { root } => root.clone(),
             Freezer::None => return,
         };
-        let Ok(mut entries) = tokio::fs::read_dir(&root).await else { return };
+        let Ok(mut entries) = tokio::fs::read_dir(&root).await else {
+            return;
+        };
         while let Ok(Some(entry)) = entries.next_entry().await {
             let cg = entry.path();
             if !cg.is_dir() {
@@ -86,7 +92,9 @@ impl NamespaceRuntime {
     }
 
     pub fn guest_link(&self, slot: &Slot) -> GuestLink {
-        GuestLink::Veth { guest_netns: format!("weft-g{}", slot.index) }
+        GuestLink::Veth {
+            guest_netns: format!("weft-g{}", slot.index),
+        }
     }
 
     pub async fn finish_template(&self, rootfs_dir: &Path, out_dir: &Path) -> Result<()> {
@@ -97,7 +105,10 @@ impl NamespaceRuntime {
 
     pub async fn start(&self, spec: StartSpec<'_>) -> Result<NsHandle> {
         if spec.snapshot.is_some() {
-            return Err(RuntimeError::Unsupported { runtime: "namespace", what: "resuming from snapshot files" });
+            return Err(RuntimeError::Unsupported {
+                runtime: "namespace",
+                what: "resuming from snapshot files",
+            });
         }
         let dir = self.data_dir.join("sandboxes").join(spec.sandbox_id);
         let (upper, work, merged) = (dir.join("upper"), dir.join("work"), dir.join("rootfs"));
@@ -105,23 +116,54 @@ impl NamespaceRuntime {
             tokio::fs::create_dir_all(d).await?;
         }
         let lower = spec.template.dir.join("rootfs");
-        let opts = format!("lowerdir={},upperdir={},workdir={}", lower.display(), upper.display(), work.display());
-        nix::mount::mount(Some("overlay"), &merged, Some("overlay"), nix::mount::MsFlags::empty(), Some(opts.as_str()))
-            .map_err(|e| RuntimeError::Failed(format!("mounting overlay: {e}")))?;
+        let opts = format!(
+            "lowerdir={},upperdir={},workdir={}",
+            lower.display(),
+            upper.display(),
+            work.display()
+        );
+        nix::mount::mount(
+            Some("overlay"),
+            &merged,
+            Some("overlay"),
+            nix::mount::MsFlags::empty(),
+            Some(opts.as_str()),
+        )
+        .map_err(|e| RuntimeError::Failed(format!("mounting overlay: {e}")))?;
 
         let cgroup = self.create_cgroup(spec.sandbox_id).await?;
-        let GuestLink::Veth { guest_netns } = self.guest_link(spec.slot) else { unreachable!() };
+        let GuestLink::Veth { guest_netns } = self.guest_link(spec.slot) else {
+            unreachable!()
+        };
         let agent = std::env::current_exe()?;
         let mut cmd = Command::new(agent);
         cmd.arg("enter-cgroup")
-            .arg(cgroup.as_ref().map(|c| c.join("cgroup.procs")).unwrap_or_default())
+            .arg(
+                cgroup
+                    .as_ref()
+                    .map(|c| c.join("cgroup.procs"))
+                    .unwrap_or_default(),
+            )
             .arg("--")
             .args(["ip", "netns", "exec", &guest_netns])
-            .args(["unshare", "--mount", "--pid", "--uts", "--ipc", "--fork", "--kill-child"])
+            .args([
+                "unshare",
+                "--mount",
+                "--pid",
+                "--uts",
+                "--ipc",
+                "--fork",
+                "--kill-child",
+            ])
             .arg(format!("--root={}", merged.display()))
             .arg("--wd=/")
             .arg(format!("/{GUEST_INIT_PATH}"))
-            .args(["--mode", "namespace", "--hostname", &hostname(spec.sandbox_id)])
+            .args([
+                "--mode",
+                "namespace",
+                "--hostname",
+                &hostname(spec.sandbox_id),
+            ])
             .args(["--dns", &GUEST_GATEWAY.to_string()])
             .args(["--envd", &format!("/{GUEST_ENVD_PATH}")])
             // -isnotfc: no Firecracker metadata service. -no-cgroups: envd
@@ -129,7 +171,10 @@ impl NamespaceRuntime {
             .args(["--envd-arg", "-isnotfc", "--envd-arg", "-no-cgroups"])
             .args(["--envd-arg", "-port", "--envd-arg", &ENVD_PORT.to_string()])
             .env_clear()
-            .env("PATH", "/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin")
+            .env(
+                "PATH",
+                "/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin",
+            )
             .stdin(Stdio::null())
             .stdout(Stdio::piped())
             .stderr(Stdio::piped())
@@ -156,7 +201,9 @@ impl NamespaceRuntime {
         }
         let merged = h.dir.join("rootfs");
         let _ = nix::mount::umount2(&merged, nix::mount::MntFlags::MNT_DETACH);
-        tokio::fs::remove_dir_all(&h.dir).await.or_else(ignore_missing)?;
+        tokio::fs::remove_dir_all(&h.dir)
+            .await
+            .or_else(ignore_missing)?;
         Ok(())
     }
 
@@ -169,7 +216,10 @@ impl NamespaceRuntime {
     }
 
     pub async fn thaw(&self, h: &NsHandle) -> Result<()> {
-        let cg = h.cgroup.as_ref().ok_or(RuntimeError::Unsupported { runtime: "namespace", what: "resume" })?;
+        let cg = h.cgroup.as_ref().ok_or(RuntimeError::Unsupported {
+            runtime: "namespace",
+            what: "resume",
+        })?;
         self.set_frozen(cg, false).await
     }
 
@@ -187,26 +237,40 @@ impl NamespaceRuntime {
         match &self.freezer {
             Freezer::V2 { .. } => {
                 tokio::fs::write(cg.join("cgroup.freeze"), if frozen { "1" } else { "0" }).await?;
-                wait_for(cg.join("cgroup.events"), if frozen { "frozen 1" } else { "frozen 0" }).await
+                wait_for(
+                    cg.join("cgroup.events"),
+                    if frozen { "frozen 1" } else { "frozen 0" },
+                )
+                .await
             }
             Freezer::V1 { .. } => {
                 let want = if frozen { "FROZEN" } else { "THAWED" };
                 tokio::fs::write(cg.join("freezer.state"), want).await?;
                 wait_for(cg.join("freezer.state"), want).await
             }
-            Freezer::None => Err(RuntimeError::Unsupported { runtime: "namespace", what: "freezing" }),
+            Freezer::None => Err(RuntimeError::Unsupported {
+                runtime: "namespace",
+                what: "freezing",
+            }),
         }
     }
 }
 
 async fn wait_for(file: PathBuf, needle: &str) -> Result<()> {
     for _ in 0..200 {
-        if tokio::fs::read_to_string(&file).await.unwrap_or_default().contains(needle) {
+        if tokio::fs::read_to_string(&file)
+            .await
+            .unwrap_or_default()
+            .contains(needle)
+        {
             return Ok(());
         }
         tokio::time::sleep(Duration::from_millis(10)).await;
     }
-    Err(RuntimeError::Failed(format!("{} never reported {needle}", file.display())))
+    Err(RuntimeError::Failed(format!(
+        "{} never reported {needle}",
+        file.display()
+    )))
 }
 
 async fn kill_cgroup(cg: &Path) {
@@ -215,12 +279,17 @@ async fn kill_cgroup(cg: &Path) {
         return;
     }
     for _ in 0..20 {
-        let procs = tokio::fs::read_to_string(cg.join("cgroup.procs")).await.unwrap_or_default();
+        let procs = tokio::fs::read_to_string(cg.join("cgroup.procs"))
+            .await
+            .unwrap_or_default();
         if procs.trim().is_empty() {
             return;
         }
         for pid in procs.lines().filter_map(|l| l.trim().parse::<i32>().ok()) {
-            let _ = nix::sys::signal::kill(nix::unistd::Pid::from_raw(pid), nix::sys::signal::Signal::SIGKILL);
+            let _ = nix::sys::signal::kill(
+                nix::unistd::Pid::from_raw(pid),
+                nix::sys::signal::Signal::SIGKILL,
+            );
         }
         tokio::time::sleep(Duration::from_millis(25)).await;
     }

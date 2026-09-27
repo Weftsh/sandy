@@ -98,7 +98,10 @@ impl EnvdClient {
         let status = resp.status();
         if !status.is_success() {
             let body = resp.text().await.unwrap_or_default();
-            return Err(EnvdError::Status { status: status.as_u16(), body: truncate(body) });
+            return Err(EnvdError::Status {
+                status: status.as_u16(),
+                body: truncate(body),
+            });
         }
         Ok(resp
             .headers()
@@ -128,7 +131,9 @@ impl EnvdClient {
             .header("Content-Type", "application/connect+json")
             .header("Connect-Protocol-Version", "1")
             .basic_auth(user, Some(""))
-            .body(connect_envelope(&serde_json::to_vec(&body).expect("static json")));
+            .body(connect_envelope(
+                &serde_json::to_vec(&body).expect("static json"),
+            ));
         if let Some(token) = access_token {
             req = req.header("X-Access-Token", token);
         }
@@ -206,7 +211,10 @@ mod tests {
     fn parses_exit_codes() {
         let mut stream = frame(0, r#"{"event":{"start":{"pid":10}}}"#);
         stream.extend(frame(0, r#"{"event":{"data":{"stdout":"aGkK"}}}"#));
-        stream.extend(frame(0, r#"{"event":{"end":{"exited":true,"status":"exit status 0"}}}"#));
+        stream.extend(frame(
+            0,
+            r#"{"event":{"end":{"exited":true,"status":"exit status 0"}}}"#,
+        ));
         stream.extend(frame(2, "{}"));
         assert_eq!(parse_process_stream(&stream).unwrap(), 0);
 
@@ -217,15 +225,23 @@ mod tests {
 
     #[test]
     fn surfaces_stream_errors() {
-        let stream = frame(2, r#"{"error":{"code":"unauthenticated","message":"invalid username"}}"#);
-        assert!(matches!(parse_process_stream(&stream), Err(EnvdError::Protocol(m)) if m.contains("unauthenticated")));
+        let stream = frame(
+            2,
+            r#"{"error":{"code":"unauthenticated","message":"invalid username"}}"#,
+        );
+        assert!(
+            matches!(parse_process_stream(&stream), Err(EnvdError::Protocol(m)) if m.contains("unauthenticated"))
+        );
         assert!(parse_process_stream(&[0, 0, 0]).is_err());
         assert!(parse_process_stream(&frame(2, "{}")).is_err());
     }
 
     #[test]
     fn init_omits_unset_fields() {
-        let req = InitRequest { access_token: "t".into(), ..Default::default() };
+        let req = InitRequest {
+            access_token: "t".into(),
+            ..Default::default()
+        };
         let v = serde_json::to_value(&req).unwrap();
         assert_eq!(v, serde_json::json!({"accessToken":"t","envVars":{}}));
     }

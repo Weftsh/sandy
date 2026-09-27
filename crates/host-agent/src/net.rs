@@ -11,7 +11,9 @@
 //!
 //! Rules, in order of defence:
 //! 1. The slot namespace forwards only TCP and DNS from the guest, and only
-//!    to the host side of its veth. Everything else (UDP, ICMP, IPv6) drops.
+//!    to the host side of its veth. Everything else (UDP, ICMP, IPv6) drops,
+//!    and link-local destinations (the instance metadata service among them)
+//!    are refused before they leave the namespace.
 //! 2. On the host, every TCP connection arriving from a slot is redirected to
 //!    the egress forwarder and every DNS query to the guest resolver. Nothing
 //!    from a slot is routed by the host, and nothing else on the host accepts
@@ -119,15 +121,39 @@ pub fn setup_plan(cfg: &NetConfig, slot: &Slot, link: &GuestLink) -> Vec<Cmd> {
     let ns_cidr = format!("{}/30", slot.ns_ip);
     let gw_cidr = format!("{GUEST_GATEWAY}/{GUEST_PREFIX}");
     let host_ip = slot.host_ip.to_string();
-    debug_assert!(cfg.pool.contains(slot.ns_ip), "slot outside the configured pool");
+    debug_assert!(
+        cfg.pool.contains(slot.ns_ip),
+        "slot outside the configured pool"
+    );
 
     let mut plan = vec![
         ip(&["netns", "add", ns]),
         // Fails only on kernels built without IPv6, where it is off anyway.
-        in_ns(ns, "sysctl", &["-q", "-w", "net.ipv6.conf.all.disable_ipv6=1"]).allow_failure(),
-        in_ns(ns, "sysctl", &["-q", "-w", "net.ipv6.conf.default.disable_ipv6=1"]).allow_failure(),
+        in_ns(
+            ns,
+            "sysctl",
+            &["-q", "-w", "net.ipv6.conf.all.disable_ipv6=1"],
+        )
+        .allow_failure(),
+        in_ns(
+            ns,
+            "sysctl",
+            &["-q", "-w", "net.ipv6.conf.default.disable_ipv6=1"],
+        )
+        .allow_failure(),
         in_ns(ns, "sysctl", &["-q", "-w", "net.ipv4.ip_forward=1"]),
-        ip(&["link", "add", &slot.host_if, "type", "veth", "peer", "name", "veth0", "netns", ns]),
+        ip(&[
+            "link",
+            "add",
+            &slot.host_if,
+            "type",
+            "veth",
+            "peer",
+            "name",
+            "veth0",
+            "netns",
+            ns,
+        ]),
         ip(&["addr", "add", &host_cidr, "dev", &slot.host_if]),
         ip(&["link", "set", &slot.host_if, "up"]),
         ip(&["-n", ns, "link", "set", "lo", "up"]),
@@ -140,7 +166,10 @@ pub fn setup_plan(cfg: &NetConfig, slot: &Slot, link: &GuestLink) -> Vec<Cmd> {
         GuestLink::Tap { uid, gid } => {
             let (uid, gid) = (uid.to_string(), gid.to_string());
             plan.extend([
-                ip(&["-n", ns, "tuntap", "add", "dev", "tap0", "mode", "tap", "user", &uid, "group", &gid]),
+                ip(&[
+                    "-n", ns, "tuntap", "add", "dev", "tap0", "mode", "tap", "user", &uid, "group",
+                    &gid,
+                ]),
                 ip(&["-n", ns, "addr", "add", &gw_cidr, "dev", "tap0"]),
                 ip(&["-n", ns, "link", "set", "tap0", "up"]),
             ]);
@@ -151,9 +180,22 @@ pub fn setup_plan(cfg: &NetConfig, slot: &Slot, link: &GuestLink) -> Vec<Cmd> {
             let gw = GUEST_GATEWAY.to_string();
             plan.extend([
                 ip(&["netns", "add", g]),
-                in_ns(g, "sysctl", &["-q", "-w", "net.ipv6.conf.all.disable_ipv6=1"]).allow_failure(),
-                in_ns(g, "sysctl", &["-q", "-w", "net.ipv6.conf.default.disable_ipv6=1"]).allow_failure(),
-                ip(&["-n", ns, "link", "add", "tap0", "type", "veth", "peer", "name", "eth0", "netns", g]),
+                in_ns(
+                    g,
+                    "sysctl",
+                    &["-q", "-w", "net.ipv6.conf.all.disable_ipv6=1"],
+                )
+                .allow_failure(),
+                in_ns(
+                    g,
+                    "sysctl",
+                    &["-q", "-w", "net.ipv6.conf.default.disable_ipv6=1"],
+                )
+                .allow_failure(),
+                ip(&[
+                    "-n", ns, "link", "add", "tap0", "type", "veth", "peer", "name", "eth0",
+                    "netns", g,
+                ]),
                 ip(&["-n", ns, "addr", "add", &gw_cidr, "dev", "tap0"]),
                 ip(&["-n", ns, "link", "set", "tap0", "up"]),
                 ip(&["-n", g, "link", "set", "lo", "up"]),
@@ -165,7 +207,11 @@ pub fn setup_plan(cfg: &NetConfig, slot: &Slot, link: &GuestLink) -> Vec<Cmd> {
     }
 
     plan.push(in_ns(ns, "iptables-restore", &[]).stdin(slot_ruleset(slot)));
-    plan.push(in_ns(ns, "ip6tables-restore", &[]).stdin(DROP_ALL_V6.to_owned()).allow_failure());
+    plan.push(
+        in_ns(ns, "ip6tables-restore", &[])
+            .stdin(DROP_ALL_V6.to_owned())
+            .allow_failure(),
+    );
     plan
 }
 
@@ -181,7 +227,8 @@ pub fn teardown_plan(slot: &Slot, link: &GuestLink) -> Vec<Cmd> {
     plan
 }
 
-const DROP_ALL_V6: &str = "*filter\n:INPUT DROP [0:0]\n:FORWARD DROP [0:0]\n:OUTPUT DROP [0:0]\nCOMMIT\n";
+const DROP_ALL_V6: &str =
+    "*filter\n:INPUT DROP [0:0]\n:FORWARD DROP [0:0]\n:OUTPUT DROP [0:0]\nCOMMIT\n";
 
 /// The slot namespace's iptables ruleset, applied atomically.
 pub fn slot_ruleset(slot: &Slot) -> String {
@@ -207,6 +254,8 @@ pub fn slot_ruleset(slot: &Slot) -> String {
          -A INPUT -m conntrack --ctstate ESTABLISHED,RELATED -j ACCEPT\n\
          -A FORWARD -m conntrack --ctstate INVALID -j DROP\n\
          -A FORWARD -m conntrack --ctstate ESTABLISHED,RELATED -j ACCEPT\n\
+         -A FORWARD -i tap0 -d 169.254.0.0/16 -p tcp -j REJECT --reject-with tcp-reset\n\
+         -A FORWARD -i tap0 -d 169.254.0.0/16 -j DROP\n\
          -A FORWARD -i tap0 -o veth0 -s {guest} -p tcp -m conntrack --ctstate NEW -j ACCEPT\n\
          -A FORWARD -i tap0 -o veth0 -s {guest} -d {host} -p udp --dport 53 -m conntrack --ctstate NEW -j ACCEPT\n\
          -A FORWARD -i veth0 -o tap0 -s {host} -d {guest} -p tcp -m conntrack --ctstate NEW -j ACCEPT\n\
@@ -223,15 +272,71 @@ pub fn host_plan(cfg: &NetConfig) -> Vec<Cmd> {
         // Chains may already exist from a previous run.
         ipt(&["-w", "-t", "nat", "-N", "WEFT-PRE"]).allow_failure(),
         ipt(&["-w", "-t", "nat", "-F", "WEFT-PRE"]),
-        ipt(&["-w", "-t", "nat", "-A", "WEFT-PRE", "-p", "udp", "--dport", "53", "-j", "REDIRECT", "--to-ports", &dns]),
-        ipt(&["-w", "-t", "nat", "-A", "WEFT-PRE", "-p", "tcp", "--dport", "53", "-j", "REDIRECT", "--to-ports", &dns]),
-        ipt(&["-w", "-t", "nat", "-A", "WEFT-PRE", "-p", "tcp", "-j", "REDIRECT", "--to-ports", &egress]),
+        ipt(&[
+            "-w",
+            "-t",
+            "nat",
+            "-A",
+            "WEFT-PRE",
+            "-p",
+            "udp",
+            "--dport",
+            "53",
+            "-j",
+            "REDIRECT",
+            "--to-ports",
+            &dns,
+        ]),
+        ipt(&[
+            "-w",
+            "-t",
+            "nat",
+            "-A",
+            "WEFT-PRE",
+            "-p",
+            "tcp",
+            "--dport",
+            "53",
+            "-j",
+            "REDIRECT",
+            "--to-ports",
+            &dns,
+        ]),
+        ipt(&[
+            "-w",
+            "-t",
+            "nat",
+            "-A",
+            "WEFT-PRE",
+            "-p",
+            "tcp",
+            "-j",
+            "REDIRECT",
+            "--to-ports",
+            &egress,
+        ]),
         ipt(&["-w", "-N", "WEFT-IN"]).allow_failure(),
         ipt(&["-w", "-F", "WEFT-IN"]),
-        ipt(&["-w", "-A", "WEFT-IN", "-m", "conntrack", "--ctstate", "ESTABLISHED,RELATED", "-j", "ACCEPT"]),
-        ipt(&["-w", "-A", "WEFT-IN", "-p", "udp", "--dport", &dns, "-j", "ACCEPT"]),
-        ipt(&["-w", "-A", "WEFT-IN", "-p", "tcp", "--dport", &dns, "-j", "ACCEPT"]),
-        ipt(&["-w", "-A", "WEFT-IN", "-p", "tcp", "--dport", &egress, "-j", "ACCEPT"]),
+        ipt(&[
+            "-w",
+            "-A",
+            "WEFT-IN",
+            "-m",
+            "conntrack",
+            "--ctstate",
+            "ESTABLISHED,RELATED",
+            "-j",
+            "ACCEPT",
+        ]),
+        ipt(&[
+            "-w", "-A", "WEFT-IN", "-p", "udp", "--dport", &dns, "-j", "ACCEPT",
+        ]),
+        ipt(&[
+            "-w", "-A", "WEFT-IN", "-p", "tcp", "--dport", &dns, "-j", "ACCEPT",
+        ]),
+        ipt(&[
+            "-w", "-A", "WEFT-IN", "-p", "tcp", "--dport", &egress, "-j", "ACCEPT",
+        ]),
         ipt(&["-w", "-A", "WEFT-IN", "-j", "DROP"]),
         ipt(&["-w", "-N", "WEFT-FWD"]).allow_failure(),
         ipt(&["-w", "-F", "WEFT-FWD"]),
@@ -305,7 +410,9 @@ pub mod ipnet_lite {
         fn from_str(s: &str) -> Result<Self, Self::Err> {
             let (ip, prefix) = s.split_once('/').ok_or("expected a.b.c.d/n")?;
             let ip: Ipv4Addr = ip.parse().map_err(|_| format!("bad address {ip:?}"))?;
-            let prefix: u8 = prefix.parse().map_err(|_| format!("bad prefix {prefix:?}"))?;
+            let prefix: u8 = prefix
+                .parse()
+                .map_err(|_| format!("bad prefix {prefix:?}"))?;
             Self::new(ip, prefix)
         }
     }
@@ -330,20 +437,39 @@ mod tests {
         let s0 = Slot::new(&c, 0).unwrap();
         let s1 = Slot::new(&c, 1).unwrap();
         let last = Slot::new(&c, 16383).unwrap();
-        assert_eq!((s0.host_ip, s0.ns_ip), ("10.200.0.1".parse().unwrap(), "10.200.0.2".parse().unwrap()));
-        assert_eq!((s1.host_ip, s1.ns_ip), ("10.200.0.5".parse().unwrap(), "10.200.0.6".parse().unwrap()));
+        assert_eq!(
+            (s0.host_ip, s0.ns_ip),
+            ("10.200.0.1".parse().unwrap(), "10.200.0.2".parse().unwrap())
+        );
+        assert_eq!(
+            (s1.host_ip, s1.ns_ip),
+            ("10.200.0.5".parse().unwrap(), "10.200.0.6".parse().unwrap())
+        );
         assert_eq!(last.ns_ip, "10.200.255.254".parse::<Ipv4Addr>().unwrap());
         assert!(Slot::new(&c, 16384).is_none());
         assert_eq!(s1.host_if, "wv1");
-        assert!(last.host_if.len() <= 15, "interface names are limited to 15 bytes");
+        assert!(
+            last.host_if.len() <= 15,
+            "interface names are limited to 15 bytes"
+        );
     }
 
     #[test]
     fn maps_namespace_addresses_back_to_slots() {
         let c = cfg();
-        assert_eq!(Slot::index_for_ns_ip(&c, "10.200.0.6".parse().unwrap()), Some(1));
-        assert_eq!(Slot::index_for_ns_ip(&c, "10.200.0.5".parse().unwrap()), None, "host side is not a sandbox");
-        assert_eq!(Slot::index_for_ns_ip(&c, "10.201.0.6".parse().unwrap()), None);
+        assert_eq!(
+            Slot::index_for_ns_ip(&c, "10.200.0.6".parse().unwrap()),
+            Some(1)
+        );
+        assert_eq!(
+            Slot::index_for_ns_ip(&c, "10.200.0.5".parse().unwrap()),
+            None,
+            "host side is not a sandbox"
+        );
+        assert_eq!(
+            Slot::index_for_ns_ip(&c, "10.201.0.6".parse().unwrap()),
+            None
+        );
     }
 
     #[test]
@@ -352,13 +478,32 @@ mod tests {
         let rules = slot_ruleset(&s);
         assert!(rules.contains(":FORWARD DROP"));
         assert!(rules.contains(":INPUT DROP"));
-        assert!(rules.contains("-A PREROUTING -i tap0 -p udp --dport 53 -j DNAT --to-destination 10.200.0.13:53"));
+        assert!(rules.contains(
+            "-A PREROUTING -i tap0 -p udp --dport 53 -j DNAT --to-destination 10.200.0.13:53"
+        ));
         assert!(rules.contains("-A POSTROUTING -o veth0 -j SNAT --to-source 10.200.0.14"));
-        assert!(rules.contains("-A PREROUTING -i veth0 -s 10.200.0.13 -p tcp -j DNAT --to-destination 169.254.0.21"));
+        assert!(rules.contains(
+            "-A PREROUTING -i veth0 -s 10.200.0.13 -p tcp -j DNAT --to-destination 169.254.0.21"
+        ));
+        let imds_reject = rules
+            .find("-d 169.254.0.0/16 -p tcp -j REJECT")
+            .expect("link-local reject rule");
+        let tcp_accept = rules
+            .find("-o veth0 -s 169.254.0.21 -p tcp")
+            .expect("tcp accept rule");
+        assert!(
+            imds_reject < tcp_accept,
+            "link-local must be refused before TCP is accepted"
+        );
         // No rule accepts UDP other than DNS, ICMP, or anything to other destinations.
-        for line in rules.lines().filter(|l| l.starts_with("-A FORWARD") && l.contains("ACCEPT")) {
+        for line in rules
+            .lines()
+            .filter(|l| l.starts_with("-A FORWARD") && l.contains("ACCEPT"))
+        {
             assert!(
-                line.contains("ESTABLISHED") || line.contains("-p tcp") || line.contains("--dport 53"),
+                line.contains("ESTABLISHED")
+                    || line.contains("-p tcp -m conntrack")
+                    || line.contains("--dport 53"),
                 "unexpected accept: {line}"
             );
         }
@@ -369,22 +514,46 @@ mod tests {
     fn setup_plan_for_firecracker_uses_a_tap_owned_by_the_jail_user() {
         let c = cfg();
         let s = Slot::new(&c, 7).unwrap();
-        let plan = setup_plan(&c, &s, &GuestLink::Tap { uid: 200_007, gid: 200_007 });
+        let plan = setup_plan(
+            &c,
+            &s,
+            &GuestLink::Tap {
+                uid: 200_007,
+                gid: 200_007,
+            },
+        );
         let text: Vec<String> = plan.iter().map(|c| c.to_string()).collect();
-        assert!(text.contains(&"ip -n weft-s7 tuntap add dev tap0 mode tap user 200007 group 200007".to_string()));
-        assert!(text.iter().any(|t| t == "ip netns exec weft-s7 iptables-restore"));
-        assert!(text.iter().any(|t| t.ends_with("net.ipv6.conf.all.disable_ipv6=1")));
+        assert!(text.contains(
+            &"ip -n weft-s7 tuntap add dev tap0 mode tap user 200007 group 200007".to_string()
+        ));
+        assert!(text
+            .iter()
+            .any(|t| t == "ip netns exec weft-s7 iptables-restore"));
+        assert!(text
+            .iter()
+            .any(|t| t.ends_with("net.ipv6.conf.all.disable_ipv6=1")));
     }
 
     #[test]
     fn setup_plan_for_namespaces_builds_a_guest_namespace() {
         let c = cfg();
         let s = Slot::new(&c, 2).unwrap();
-        let plan = setup_plan(&c, &s, &GuestLink::Veth { guest_netns: "weft-g2".into() });
+        let plan = setup_plan(
+            &c,
+            &s,
+            &GuestLink::Veth {
+                guest_netns: "weft-g2".into(),
+            },
+        );
         let text: Vec<String> = plan.iter().map(|c| c.to_string()).collect();
         assert!(text.contains(&"ip -n weft-g2 addr add 169.254.0.21/30 dev eth0".to_string()));
         assert!(text.contains(&"ip -n weft-g2 route add default via 169.254.0.22".to_string()));
-        let teardown = teardown_plan(&s, &GuestLink::Veth { guest_netns: "weft-g2".into() });
+        let teardown = teardown_plan(
+            &s,
+            &GuestLink::Veth {
+                guest_netns: "weft-g2".into(),
+            },
+        );
         assert!(teardown.iter().all(|c| c.allow_failure));
         assert_eq!(teardown.len(), 3);
     }
@@ -393,11 +562,24 @@ mod tests {
     fn host_plan_redirects_all_slot_tcp_and_dns_and_accepts_nothing_else() {
         let plan = host_plan(&cfg());
         let text: Vec<String> = plan.iter().map(|c| c.to_string()).collect();
-        assert!(text.iter().any(|t| t.contains("WEFT-PRE -p tcp -j REDIRECT --to-ports 15001")));
-        assert!(text.iter().any(|t| t.contains("WEFT-PRE -p udp --dport 53 -j REDIRECT --to-ports 15053")));
-        let dns_pos = text.iter().position(|t| t.contains("-p tcp --dport 53 -j REDIRECT")).unwrap();
-        let tcp_pos = text.iter().position(|t| t.contains("-p tcp -j REDIRECT")).unwrap();
-        assert!(dns_pos < tcp_pos, "DNS over TCP must match before the catch-all TCP redirect");
+        assert!(text
+            .iter()
+            .any(|t| t.contains("WEFT-PRE -p tcp -j REDIRECT --to-ports 15001")));
+        assert!(text
+            .iter()
+            .any(|t| t.contains("WEFT-PRE -p udp --dport 53 -j REDIRECT --to-ports 15053")));
+        let dns_pos = text
+            .iter()
+            .position(|t| t.contains("-p tcp --dport 53 -j REDIRECT"))
+            .unwrap();
+        let tcp_pos = text
+            .iter()
+            .position(|t| t.contains("-p tcp -j REDIRECT"))
+            .unwrap();
+        assert!(
+            dns_pos < tcp_pos,
+            "DNS over TCP must match before the catch-all TCP redirect"
+        );
         assert!(text.iter().any(|t| t.ends_with("WEFT-IN -j DROP")));
         assert!(text.iter().any(|t| t.ends_with("WEFT-FWD -j DROP")));
     }

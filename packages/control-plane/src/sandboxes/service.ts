@@ -252,6 +252,9 @@ export class SandboxService {
       }
     }
     if (lastError instanceof HostError && lastError.status === 400) throw badRequest(lastError.message);
+    if (lastError instanceof HostError && lastError.status === 503) {
+      throw unavailable("every sandbox host is at capacity; try again shortly");
+    }
     if (lastError) throw internal(`sandbox could not be started: ${lastError instanceof Error ? lastError.message : String(lastError)}`);
     throw unavailable("no sandbox host has capacity right now; try again shortly");
   }

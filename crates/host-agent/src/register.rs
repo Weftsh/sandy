@@ -33,7 +33,10 @@ impl Registration {
             .timeout(Duration::from_secs(10))
             .build()
             .expect("static client configuration");
-        let url = format!("{}/internal/v1/hosts/heartbeat", self.control_plane_url.trim_end_matches('/'));
+        let url = format!(
+            "{}/internal/v1/hosts/heartbeat",
+            self.control_plane_url.trim_end_matches('/')
+        );
         let mut interval = Duration::from_secs(5);
         let mut failures = 0u32;
         loop {
@@ -59,7 +62,12 @@ impl Registration {
         }
     }
 
-    async fn beat(&self, http: &reqwest::Client, url: &str, manager: &Manager) -> anyhow::Result<HeartbeatResponse> {
+    async fn beat(
+        &self,
+        http: &reqwest::Client,
+        url: &str,
+        manager: &Manager,
+    ) -> anyhow::Result<HeartbeatResponse> {
         let body = HeartbeatRequest {
             host_id: self.host_id.clone(),
             private_ip: self.private_ip.clone(),
@@ -73,17 +81,28 @@ impl Registration {
             sandboxes: manager
                 .list()
                 .into_iter()
-                .map(|s| HeartbeatSandbox { sandbox_id: s.sandbox_id, state: s.state })
+                .map(|s| HeartbeatSandbox {
+                    sandbox_id: s.sandbox_id,
+                    state: s.state,
+                })
                 .collect(),
             templates: manager.cached_templates(),
             draining: false,
         };
         let header = self.auth.header().await?;
-        let resp = http.post(url).header(AUTH_HEADER, header.as_ref()).json(&body).send().await?;
+        let resp = http
+            .post(url)
+            .header(AUTH_HEADER, header.as_ref())
+            .json(&body)
+            .send()
+            .await?;
         let status = resp.status();
         if !status.is_success() {
             let text = resp.text().await.unwrap_or_default();
-            anyhow::bail!("HTTP {status}: {}", text.chars().take(300).collect::<String>());
+            anyhow::bail!(
+                "HTTP {status}: {}",
+                text.chars().take(300).collect::<String>()
+            );
         }
         Ok(resp.json().await?)
     }

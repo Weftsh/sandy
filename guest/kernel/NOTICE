@@ -1,0 +1,9 @@
+microvm-kernel-ci-x86_64-6.18.config
+Copyright Amazon.com, Inc. or its affiliates. All Rights Reserved.
+Licensed under the Apache License, Version 2.0 (see ../../LICENSES/Apache-2.0.txt).
+
+Source: resources/guest_configs/microvm-kernel-ci-x86_64-6.18.config in
+https://github.com/firecracker-microvm/firecracker at tag v1.17.0, fetched
+from
+https://raw.githubusercontent.com/firecracker-microvm/firecracker/v1.17.0/resources/guest_configs/microvm-kernel-ci-x86_64-6.18.config
+and vendored unmodified (SHA-256 pinned in VERSION).

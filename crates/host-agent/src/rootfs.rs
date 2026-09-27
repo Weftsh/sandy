@@ -87,7 +87,11 @@ pub fn extract_layer<R: Read>(reader: R, root: &Path) -> Result<(), RootfsError>
         if has_symlink_ancestor(root, &rel)? {
             return Err(RootfsError::Unsafe(display, "writes through a symlink"));
         }
-        let name = rel.file_name().and_then(|n| n.to_str()).unwrap_or_default().to_owned();
+        let name = rel
+            .file_name()
+            .and_then(|n| n.to_str())
+            .unwrap_or_default()
+            .to_owned();
         let parent = rel.parent().map(Path::to_path_buf).unwrap_or_default();
 
         // Whiteouts: `.wh..wh..opq` empties the directory; `.wh.name` deletes `name`.
@@ -118,22 +122,31 @@ pub fn extract_layer<R: Read>(reader: R, root: &Path) -> Result<(), RootfsError>
             let link = entry
                 .link_name()?
                 .ok_or_else(|| RootfsError::Unsafe(display.clone(), "hard link without target"))?;
-            let link_rel = safe_relative(&link).map_err(|why| RootfsError::Unsafe(display.clone(), why))?;
+            let link_rel =
+                safe_relative(&link).map_err(|why| RootfsError::Unsafe(display.clone(), why))?;
             if link_rel.as_os_str().is_empty() {
-                return Err(RootfsError::Unsafe(display, "hard link to the root directory"));
+                return Err(RootfsError::Unsafe(
+                    display,
+                    "hard link to the root directory",
+                ));
             }
             if has_symlink_ancestor(root, &link_rel)? {
                 return Err(RootfsError::Unsafe(display, "hard link through a symlink"));
             }
             let src = root.join(&link_rel);
-            if fs::symlink_metadata(&src).map(|m| m.file_type().is_symlink()).unwrap_or(false) {
+            if fs::symlink_metadata(&src)
+                .map(|m| m.file_type().is_symlink())
+                .unwrap_or(false)
+            {
                 return Err(RootfsError::Unsafe(display, "hard link to a symlink"));
             }
         }
         if let Some(p) = dest.parent() {
             fs::create_dir_all(p)?;
         }
-        entry.unpack(&dest).map_err(|e| RootfsError::Other(format!("extracting {display}: {e}")))?;
+        entry
+            .unpack(&dest)
+            .map_err(|e| RootfsError::Other(format!("extracting {display}: {e}")))?;
     }
     Ok(())
 }
@@ -151,7 +164,10 @@ fn remove_any(path: &Path) -> io::Result<()> {
 pub fn open_layer(path: &Path, media_type: &str) -> io::Result<Box<dyn Read>> {
     let file = io::BufReader::new(fs::File::open(path)?);
     if media_type.ends_with("+zstd") {
-        return Err(io::Error::new(io::ErrorKind::Unsupported, "zstd layers are not supported yet; push a gzip image"));
+        return Err(io::Error::new(
+            io::ErrorKind::Unsupported,
+            "zstd layers are not supported yet; push a gzip image",
+        ));
     }
     if media_type.ends_with("gzip") {
         return Ok(Box::new(flate2::read::MultiGzDecoder::new(file)));
@@ -160,10 +176,15 @@ pub fn open_layer(path: &Path, media_type: &str) -> io::Result<Box<dyn Read>> {
 }
 
 /// Entry point of the `unpack-layer` helper: chroot into `root`, extract.
-pub fn unpack_layer_in_chroot(root: &Path, layer: &Path, media_type: &str) -> Result<(), RootfsError> {
+pub fn unpack_layer_in_chroot(
+    root: &Path,
+    layer: &Path,
+    media_type: &str,
+) -> Result<(), RootfsError> {
     // Open the layer before the chroot hides it.
     let reader = open_layer(layer, media_type)?;
-    nix::unistd::chroot(root).map_err(|e| RootfsError::Other(format!("chroot {}: {e}", root.display())))?;
+    nix::unistd::chroot(root)
+        .map_err(|e| RootfsError::Other(format!("chroot {}: {e}", root.display())))?;
     std::env::set_current_dir("/")?;
     extract_layer(reader, Path::new("/"))
 }
@@ -175,16 +196,33 @@ pub fn prepare(root: &Path, guest_dir: &Path) -> Result<(), RootfsError> {
     if fs::symlink_metadata(&shell).is_err() {
         return Err(RootfsError::MissingShell("/bin/sh"));
     }
-    for dir in ["proc", "sys", "dev", "run", "tmp", "usr/bin", "usr/local/bin", "etc", "home"] {
+    for dir in [
+        "proc",
+        "sys",
+        "dev",
+        "run",
+        "tmp",
+        "usr/bin",
+        "usr/local/bin",
+        "etc",
+        "home",
+    ] {
         let p = root.join(dir);
-        if fs::symlink_metadata(&p).map(|m| m.file_type().is_symlink()).unwrap_or(false) {
+        if fs::symlink_metadata(&p)
+            .map(|m| m.file_type().is_symlink())
+            .unwrap_or(false)
+        {
             continue; // e.g. /bin -> usr/bin on merged-usr images
         }
         fs::create_dir_all(&p)?;
     }
     fs::set_permissions(root.join("tmp"), fs::Permissions::from_mode(0o1777))?;
     install_file(&guest_dir.join("envd"), &root.join(GUEST_ENVD_PATH), 0o755)?;
-    install_file(&guest_dir.join("weft-guest-init"), &root.join(GUEST_INIT_PATH), 0o755)?;
+    install_file(
+        &guest_dir.join("weft-guest-init"),
+        &root.join(GUEST_INIT_PATH),
+        0o755,
+    )?;
     ensure_user(root)?;
     Ok(())
 }
@@ -193,7 +231,8 @@ fn install_file(src: &Path, dst: &Path, mode: u32) -> Result<(), RootfsError> {
     if fs::symlink_metadata(dst).is_ok() {
         remove_any(dst)?;
     }
-    fs::copy(src, dst).map_err(|e| RootfsError::Other(format!("installing {}: {e}", src.display())))?;
+    fs::copy(src, dst)
+        .map_err(|e| RootfsError::Other(format!("installing {}: {e}", src.display())))?;
     fs::set_permissions(dst, fs::Permissions::from_mode(mode))?;
     Ok(())
 }
@@ -217,10 +256,23 @@ fn ensure_user(root: &Path) -> Result<(), RootfsError> {
             .unwrap_or(*uid);
         (*uid, gid)
     } else {
-        let taken: Vec<u32> = users.values().copied().chain(groups.values().copied()).collect();
-        let id = (1000..60000).find(|i| !taken.contains(i)).ok_or_else(|| RootfsError::Other("no free uid".into()))?;
-        let shell = if root.join("bin/bash").exists() { "/bin/bash" } else { "/bin/sh" };
-        append_line(&passwd_path, &format!("{SANDBOX_USER}:x:{id}:{id}::/home/{SANDBOX_USER}:{shell}"))?;
+        let taken: Vec<u32> = users
+            .values()
+            .copied()
+            .chain(groups.values().copied())
+            .collect();
+        let id = (1000..60000)
+            .find(|i| !taken.contains(i))
+            .ok_or_else(|| RootfsError::Other("no free uid".into()))?;
+        let shell = if root.join("bin/bash").exists() {
+            "/bin/bash"
+        } else {
+            "/bin/sh"
+        };
+        append_line(
+            &passwd_path,
+            &format!("{SANDBOX_USER}:x:{id}:{id}::/home/{SANDBOX_USER}:{shell}"),
+        )?;
         if !groups.contains_key(SANDBOX_USER) {
             append_line(&group_path, &format!("{SANDBOX_USER}:x:{id}:"))?;
         }
@@ -332,7 +384,10 @@ mod tests {
     fn refuses_parent_traversal() {
         let dir = tempfile::tempdir().unwrap();
         let evil = tar_with(&[("../escape", tar::EntryType::Regular, b"x", None)]);
-        assert!(matches!(extract_layer(Cursor::new(evil), dir.path()), Err(RootfsError::Unsafe(..))));
+        assert!(matches!(
+            extract_layer(Cursor::new(evil), dir.path()),
+            Err(RootfsError::Unsafe(..))
+        ));
         assert!(!dir.path().parent().unwrap().join("escape").exists());
     }
 
@@ -345,7 +400,10 @@ mod tests {
             ("link", tar::EntryType::Symlink, b"", Some(&target)),
             ("link/pwned", tar::EntryType::Regular, b"x", None),
         ]);
-        assert!(matches!(extract_layer(Cursor::new(evil), dir.path()), Err(RootfsError::Unsafe(..))));
+        assert!(matches!(
+            extract_layer(Cursor::new(evil), dir.path()),
+            Err(RootfsError::Unsafe(..))
+        ));
         assert!(!outside.path().join("pwned").exists());
     }
 
@@ -359,7 +417,10 @@ mod tests {
         extract_layer(Cursor::new(layer1), dir.path()).unwrap();
         let layer2 = tar_with(&[("file", tar::EntryType::Regular, b"new", None)]);
         extract_layer(Cursor::new(layer2), dir.path()).unwrap();
-        assert_eq!(fs::read(outside.path().join("victim")).unwrap(), b"original");
+        assert_eq!(
+            fs::read(outside.path().join("victim")).unwrap(),
+            b"original"
+        );
         assert_eq!(fs::read(dir.path().join("file")).unwrap(), b"new");
     }
 
@@ -370,7 +431,10 @@ mod tests {
             ("etc", tar::EntryType::Symlink, b"", Some("/etc")),
             ("stolen", tar::EntryType::Link, b"", Some("etc/shadow")),
         ]);
-        assert!(matches!(extract_layer(Cursor::new(evil), dir.path()), Err(RootfsError::Unsafe(..))));
+        assert!(matches!(
+            extract_layer(Cursor::new(evil), dir.path()),
+            Err(RootfsError::Unsafe(..))
+        ));
     }
 
     #[test]
@@ -379,27 +443,53 @@ mod tests {
         let guest = tempfile::tempdir().unwrap();
         fs::write(guest.path().join("envd"), b"envd").unwrap();
         fs::write(guest.path().join("weft-guest-init"), b"init").unwrap();
-        assert!(matches!(prepare(root.path(), guest.path()), Err(RootfsError::MissingShell(_))));
+        assert!(matches!(
+            prepare(root.path(), guest.path()),
+            Err(RootfsError::MissingShell(_))
+        ));
 
         fs::create_dir_all(root.path().join("bin")).unwrap();
         fs::write(root.path().join("bin/sh"), b"").unwrap();
         fs::create_dir_all(root.path().join("etc")).unwrap();
-        fs::write(root.path().join("etc/passwd"), "root:x:0:0:root:/root:/bin/sh\nubuntu:x:1000:1000::/home/ubuntu:/bin/sh\n").unwrap();
+        fs::write(
+            root.path().join("etc/passwd"),
+            "root:x:0:0:root:/root:/bin/sh\nubuntu:x:1000:1000::/home/ubuntu:/bin/sh\n",
+        )
+        .unwrap();
         fs::write(root.path().join("etc/group"), "root:x:0:\nubuntu:x:1000:\n").unwrap();
         prepare(root.path(), guest.path()).unwrap();
         let passwd = fs::read_to_string(root.path().join("etc/passwd")).unwrap();
-        assert!(passwd.contains("user:x:1001:1001::/home/user:/bin/sh"), "{passwd}");
-        assert!(fs::read_to_string(root.path().join("etc/group")).unwrap().contains("user:x:1001:"));
-        assert_eq!(fs::read(root.path().join(GUEST_ENVD_PATH)).unwrap(), b"envd");
+        assert!(
+            passwd.contains("user:x:1001:1001::/home/user:/bin/sh"),
+            "{passwd}"
+        );
+        assert!(fs::read_to_string(root.path().join("etc/group"))
+            .unwrap()
+            .contains("user:x:1001:"));
+        assert_eq!(
+            fs::read(root.path().join(GUEST_ENVD_PATH)).unwrap(),
+            b"envd"
+        );
         assert!(root.path().join("home/user").is_dir());
         // Idempotent.
         prepare(root.path(), guest.path()).unwrap();
-        assert_eq!(fs::read_to_string(root.path().join("etc/passwd")).unwrap().matches("user:x:").count(), 1);
+        assert_eq!(
+            fs::read_to_string(root.path().join("etc/passwd"))
+                .unwrap()
+                .matches("user:x:")
+                .count(),
+            1
+        );
     }
 
     #[test]
     fn parses_image_env() {
-        let env = parse_env(&["PATH=/usr/bin:/bin".into(), "EMPTY=".into(), "BAD".into(), "=x".into()]);
+        let env = parse_env(&[
+            "PATH=/usr/bin:/bin".into(),
+            "EMPTY=".into(),
+            "BAD".into(),
+            "=x".into(),
+        ]);
         assert_eq!(env.get("PATH").unwrap(), "/usr/bin:/bin");
         assert_eq!(env.get("EMPTY").unwrap(), "");
         assert_eq!(env.len(), 2);

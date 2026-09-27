@@ -1,0 +1,144 @@
+name: CI
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+concurrency:
+  group: ci-${{ github.ref }}
+  cancel-in-progress: true
+
+env:
+  CARGO_TERM_COLOR: always
+
+jobs:
+  rust:
+    name: Rust (fmt, clippy, tests)
+    runs-on: ubuntu-24.04
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+      - name: Toolchain (pinned by rust-toolchain.toml)
+        run: rustup show active-toolchain
+      - name: Format
+        run: cargo fmt --all --check
+      - name: Clippy
+        run: cargo clippy --workspace --all-targets --locked -- -D warnings
+      - name: Tests
+        run: cargo test --workspace --locked
+
+  typescript:
+    name: TypeScript (typecheck, tests)
+    runs-on: ubuntu-24.04
+    services:
+      dynamodb:
+        image: amazon/dynamodb-local:3.3.1
+        ports: ["8000:8000"]
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+      - uses: pnpm/action-setup@ea17c68df8912ef543352723c149a84f56e3d413 # v6.1.0
+      - uses: actions/setup-node@820762786026740c76f36085b0efc47a31fe5020 # v7.0.0
+        with:
+          node-version: 22
+          package-manager-cache: false
+      - run: pnpm install --frozen-lockfile
+      - run: pnpm -r run build
+      - run: pnpm -r run typecheck
+      - name: Unit and store tests (DynamoDB Local)
+        env:
+          WEFT_TEST_DYNAMODB_ENDPOINT: http://localhost:8000
+        run: pnpm test
+
+  deploy:
+    name: Deployment (CloudFormation, Lambdas, Packer)
+    runs-on: ubuntu-24.04
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+      - uses: pnpm/action-setup@ea17c68df8912ef543352723c149a84f56e3d413 # v6.1.0
+      - uses: actions/setup-node@820762786026740c76f36085b0efc47a31fe5020 # v7.0.0
+        with:
+          node-version: 22
+          package-manager-cache: false
+      - name: Lambda tests
+        working-directory: deploy/cloudformation/functions
+        run: |
+          pnpm install --frozen-lockfile
+          pnpm test
+      - name: cfn-lint and checkov
+        run: |
+          python3 -m venv .venv
+          .venv/bin/pip install --quiet cfn-lint==1.57.0 checkov pytest
+          .venv/bin/cfn-lint deploy/cloudformation/weft-sandboxes.yaml
+          .venv/bin/checkov --quiet --compact -f deploy/cloudformation/weft-sandboxes.yaml
+          .venv/bin/python -m pytest -q deploy/cloudformation/scripts
+      - uses: hashicorp/setup-packer@ce93c3c08a6c2ff2275bf4b54ff0d9a75f6c9789 # v3.4.0
+      - name: Packer validate
+        working-directory: deploy/packer
+        run: |
+          packer init .
+          packer fmt -check .
+          packer validate -syntax-only .
+      - name: Shell scripts
+        run: shellcheck scripts/*.sh guest/envd/build.sh tests/escape/host_checks.sh deploy/packer/scripts/*.sh
+
+  e2e:
+    name: E2B compatibility and escape suites (${{ matrix.routing }})
+    runs-on: ubuntu-24.04
+    needs: [rust, typescript]
+    strategy:
+      fail-fast: false
+      matrix:
+        routing: [header, https]
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+      - uses: pnpm/action-setup@ea17c68df8912ef543352723c149a84f56e3d413 # v6.1.0
+      - uses: actions/setup-node@820762786026740c76f36085b0efc47a31fe5020 # v7.0.0
+        with:
+          node-version: 22
+          package-manager-cache: false
+      - uses: actions/setup-go@b7ad1dad31e06c5925ef5d2fc7ad053ef454303e # v7.0.0
+        with:
+          go-version: "1.24"
+          cache: false
+      - name: Build
+        run: |
+          sudo apt-get update -q && sudo apt-get install -y -q iproute2 iptables
+          rustup target add x86_64-unknown-linux-musl
+          guest/envd/build.sh dist/guest
+          cargo build --release --locked -p weft-guest-init --target x86_64-unknown-linux-musl
+          cp target/x86_64-unknown-linux-musl/release/weft-guest-init dist/guest/
+          cargo build --release --locked -p weft-host-agent -p weft-egress-gateway
+          pnpm install --frozen-lockfile
+          pnpm -r run build
+      - name: Start the stack (namespace runtime)
+        run: sudo -E env "PATH=$PATH" scripts/dev-stack.sh up --no-build ${{ matrix.routing == 'https' && '--https' || '' }}
+      - name: E2B compatibility suite (unmodified SDKs)
+        run: |
+          sudo chown -R "$USER" .weft
+          set -a; . .weft/dev/e2b.env; set +a
+          packages/compat-tests/run.sh
+      - name: Escape-attempt suite (network)
+        run: |
+          set -a; . .weft/dev/e2b.env; set +a
+          .weft/compat-venv/bin/pytest -q tests/escape
+      - name: Logs
+        if: always()
+        run: sudo tail -n 200 .weft/dev/*.log || true
+      - uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
+        if: always()
+        with:
+          name: compat-reports-${{ matrix.routing }}
+          path: packages/compat-tests/reports/
+          retention-days: 14

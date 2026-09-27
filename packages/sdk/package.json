@@ -1,0 +1,37 @@
+{
+  "name": "@weftsh/sandbox",
+  "version": "0.1.0",
+  "description": "Weft Sandboxes SDK helpers and admin CLI. Use the unmodified E2B SDK for sandboxes; use this package to configure it and to manage teams, keys, egress policies and templates.",
+  "license": "Apache-2.0",
+  "type": "module",
+  "main": "dist/index.js",
+  "types": "dist/index.d.ts",
+  "exports": {
+    ".": {
+      "types": "./dist/index.d.ts",
+      "default": "./dist/index.js"
+    }
+  },
+  "bin": {
+    "weft-sandbox": "dist/cli.js"
+  },
+  "files": ["dist", "README.md", "LICENSE"],
+  "engines": {
+    "node": ">=20"
+  },
+  "repository": {
+    "type": "git",
+    "url": "git+https://github.com/weftsh/byoc.git",
+    "directory": "packages/sdk"
+  },
+  "scripts": {
+    "build": "tsc -p tsconfig.build.json",
+    "typecheck": "tsc -p tsconfig.json --noEmit",
+    "test": "vitest run"
+  },
+  "devDependencies": {
+    "@types/node": "^22.20.4",
+    "typescript": "~6.0.3",
+    "vitest": "^4.1.11"
+  }
+}

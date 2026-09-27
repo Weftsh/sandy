@@ -56,12 +56,15 @@ impl ImageRef {
     pub fn parse(input: &str) -> Result<Self, OciError> {
         let bad = || OciError::BadReference(input.to_owned());
         let s = input.trim();
-        if s.is_empty() || s.len() > 512 || s.contains("://") || s.chars().any(char::is_whitespace) {
+        if s.is_empty() || s.len() > 512 || s.contains("://") || s.chars().any(char::is_whitespace)
+        {
             return Err(bad());
         }
         let (name, digest) = match s.split_once('@') {
             Some((n, d)) => {
-                let valid = d.strip_prefix("sha256:").is_some_and(|h| h.len() == 64 && h.bytes().all(|b| b.is_ascii_hexdigit()));
+                let valid = d
+                    .strip_prefix("sha256:")
+                    .is_some_and(|h| h.len() == 64 && h.bytes().all(|b| b.is_ascii_hexdigit()));
                 if !valid {
                     return Err(bad());
                 }
@@ -70,7 +73,9 @@ impl ImageRef {
             None => (s, None),
         };
         let (registry, rest) = match name.split_once('/') {
-            Some((first, rest)) if first.contains('.') || first.contains(':') || first == "localhost" => {
+            Some((first, rest))
+                if first.contains('.') || first.contains(':') || first == "localhost" =>
+            {
                 (first.to_owned(), rest.to_owned())
             }
             _ => ("docker.io".to_owned(), name.to_owned()),
@@ -86,14 +91,28 @@ impl ImageRef {
         };
         let valid_repo = repository.split('/').all(|part| {
             !part.is_empty()
-                && part.bytes().all(|b| b.is_ascii_lowercase() || b.is_ascii_digit() || b"._-".contains(&b))
+                && part
+                    .bytes()
+                    .all(|b| b.is_ascii_lowercase() || b.is_ascii_digit() || b"._-".contains(&b))
         });
-        let valid_tag = !tag.is_empty() && tag.len() <= 128 && tag.bytes().all(|b| b.is_ascii_alphanumeric() || b"._-".contains(&b));
+        let valid_tag = !tag.is_empty()
+            && tag.len() <= 128
+            && tag
+                .bytes()
+                .all(|b| b.is_ascii_alphanumeric() || b"._-".contains(&b));
         if !valid_repo || !valid_tag {
             return Err(bad());
         }
-        let registry = if registry == "docker.io" { "registry-1.docker.io".to_owned() } else { registry };
-        Ok(Self { registry, repository, reference: digest.unwrap_or(tag) })
+        let registry = if registry == "docker.io" {
+            "registry-1.docker.io".to_owned()
+        } else {
+            registry
+        };
+        Ok(Self {
+            registry,
+            repository,
+            reference: digest.unwrap_or(tag),
+        })
     }
 }
 
@@ -171,7 +190,12 @@ impl Puller {
             .user_agent(concat!("weft-host-agent/", env!("CARGO_PKG_VERSION")))
             .connect_timeout(std::time::Duration::from_secs(15))
             .build()?;
-        Ok(Self { http, creds, token: None, arch: "amd64" })
+        Ok(Self {
+            http,
+            creds,
+            token: None,
+            arch: "amd64",
+        })
     }
 
     /// Resolves the image and downloads its layers into `dir`.
@@ -181,20 +205,30 @@ impl Puller {
         if let Some(list) = manifest.manifests.take() {
             let chosen = list
                 .iter()
-                .find(|d| d.platform.as_ref().is_some_and(|p| p.os == "linux" && p.architecture == self.arch))
+                .find(|d| {
+                    d.platform
+                        .as_ref()
+                        .is_some_and(|p| p.os == "linux" && p.architecture == self.arch)
+                })
                 .ok_or_else(|| OciError::NoPlatform(self.arch.to_owned()))?;
             let digest = chosen.digest.clone();
             manifest = self.manifest(image, &digest).await?;
         }
-        let config_desc = manifest.config.ok_or_else(|| OciError::Unsupported("manifest has no config".into()))?;
+        let config_desc = manifest
+            .config
+            .ok_or_else(|| OciError::Unsupported("manifest has no config".into()))?;
         let config_bytes = self.blob_bytes(image, &config_desc).await?;
-        let config = serde_json::from_slice::<ConfigFile>(&config_bytes)?.config.unwrap_or_default();
+        let config = serde_json::from_slice::<ConfigFile>(&config_bytes)?
+            .config
+            .unwrap_or_default();
 
         let mut layers = Vec::new();
         for (i, desc) in manifest.layers.unwrap_or_default().iter().enumerate() {
             let media_type = desc.media_type.clone().unwrap_or_default();
             if !is_supported_layer(&media_type) {
-                return Err(OciError::Unsupported(format!("layer media type {media_type:?}")));
+                return Err(OciError::Unsupported(format!(
+                    "layer media type {media_type:?}"
+                )));
             }
             let path = dir.join(format!("layer-{i:03}"));
             self.download_blob(image, desc, &path).await?;
@@ -204,32 +238,53 @@ impl Puller {
     }
 
     async fn manifest(&mut self, image: &ImageRef, reference: &str) -> Result<Manifest, OciError> {
-        let url = format!("https://{}/v2/{}/manifests/{}", image.registry, image.repository, reference);
+        let url = format!(
+            "https://{}/v2/{}/manifests/{}",
+            image.registry, image.repository, reference
+        );
         let resp = self.get(image, &url, Some(ACCEPT_MANIFESTS)).await?;
         let bytes = read_limited(resp, MAX_DOCUMENT_BYTES).await?;
         if reference.starts_with("sha256:") {
             verify_digest(reference, &bytes)?;
         }
         let m: Manifest = serde_json::from_slice(&bytes)?;
-        if m.media_type.as_deref().is_some_and(|t| t.contains("manifest.v1+prettyjws")) {
+        if m.media_type
+            .as_deref()
+            .is_some_and(|t| t.contains("manifest.v1+prettyjws"))
+        {
             return Err(OciError::Unsupported("schema 1 manifests".into()));
         }
         Ok(m)
     }
 
-    async fn blob_bytes(&mut self, image: &ImageRef, desc: &Descriptor) -> Result<Vec<u8>, OciError> {
+    async fn blob_bytes(
+        &mut self,
+        image: &ImageRef,
+        desc: &Descriptor,
+    ) -> Result<Vec<u8>, OciError> {
         if desc.size as usize > MAX_DOCUMENT_BYTES {
             return Err(OciError::Unsupported("config blob too large".into()));
         }
-        let url = format!("https://{}/v2/{}/blobs/{}", image.registry, image.repository, desc.digest);
+        let url = format!(
+            "https://{}/v2/{}/blobs/{}",
+            image.registry, image.repository, desc.digest
+        );
         let resp = self.get(image, &url, None).await?;
         let bytes = read_limited(resp, MAX_DOCUMENT_BYTES).await?;
         verify_digest(&desc.digest, &bytes)?;
         Ok(bytes)
     }
 
-    async fn download_blob(&mut self, image: &ImageRef, desc: &Descriptor, path: &Path) -> Result<(), OciError> {
-        let url = format!("https://{}/v2/{}/blobs/{}", image.registry, image.repository, desc.digest);
+    async fn download_blob(
+        &mut self,
+        image: &ImageRef,
+        desc: &Descriptor,
+        path: &Path,
+    ) -> Result<(), OciError> {
+        let url = format!(
+            "https://{}/v2/{}/blobs/{}",
+            image.registry, image.repository, desc.digest
+        );
         let resp = self.get(image, &url, None).await?;
         let mut file = tokio::fs::File::create(path).await?;
         let mut hasher = Sha256::new();
@@ -239,7 +294,10 @@ impl Puller {
             let chunk = chunk?;
             written += chunk.len() as u64;
             if written > desc.size {
-                return Err(OciError::Unsupported(format!("blob {} is larger than its descriptor", desc.digest)));
+                return Err(OciError::Unsupported(format!(
+                    "blob {} is larger than its descriptor",
+                    desc.digest
+                )));
             }
             hasher.update(&chunk);
             file.write_all(&chunk).await?;
@@ -247,12 +305,20 @@ impl Puller {
         file.flush().await?;
         let actual = format!("sha256:{}", hex::encode(hasher.finalize()));
         if actual != desc.digest {
-            return Err(OciError::DigestMismatch { digest: desc.digest.clone(), actual });
+            return Err(OciError::DigestMismatch {
+                digest: desc.digest.clone(),
+                actual,
+            });
         }
         Ok(())
     }
 
-    async fn get(&mut self, image: &ImageRef, url: &str, accept: Option<&str>) -> Result<reqwest::Response, OciError> {
+    async fn get(
+        &mut self,
+        image: &ImageRef,
+        url: &str,
+        accept: Option<&str>,
+    ) -> Result<reqwest::Response, OciError> {
         let mut authenticated = false;
         for attempt in 0..6 {
             let mut req = self.http.get(url);
@@ -289,7 +355,10 @@ impl Puller {
                 continue;
             }
             if !resp.status().is_success() {
-                return Err(OciError::Status { status: resp.status().as_u16(), what: url.to_owned() });
+                return Err(OciError::Status {
+                    status: resp.status().as_u16(),
+                    what: url.to_owned(),
+                });
             }
             return Ok(resp);
         }
@@ -305,7 +374,11 @@ impl Puller {
             return Ok(());
         };
         let fields = parse_challenge(params);
-        let realm = fields.iter().find(|(k, _)| k == "realm").map(|(_, v)| v.clone()).ok_or_else(|| OciError::Auth("no realm".into()))?;
+        let realm = fields
+            .iter()
+            .find(|(k, _)| k == "realm")
+            .map(|(_, v)| v.clone())
+            .ok_or_else(|| OciError::Auth("no realm".into()))?;
         let realm_url = url::Url::parse(&realm).map_err(|_| OciError::Auth("bad realm".into()))?;
         if realm_url.scheme() != "https" {
             return Err(OciError::Auth("token realm must be HTTPS".into()));
@@ -318,7 +391,10 @@ impl Puller {
             }
         }
         if !query.iter().any(|(k, _)| k == "scope") {
-            query.push(("scope".into(), format!("repository:{}:pull", image.repository)));
+            query.push((
+                "scope".into(),
+                format!("repository:{}:pull", image.repository),
+            ));
         }
         req = req.query(&query);
         if let (Some(u), Some(p)) = (&self.creds.username, &self.creds.password) {
@@ -331,7 +407,10 @@ impl Puller {
         }
         let resp = req.send().await?;
         if !resp.status().is_success() {
-            return Err(OciError::Auth(format!("token endpoint returned HTTP {}", resp.status().as_u16())));
+            return Err(OciError::Auth(format!(
+                "token endpoint returned HTTP {}",
+                resp.status().as_u16()
+            )));
         }
         let t: Token = serde_json::from_slice(&read_limited(resp, 1024 * 1024).await?)?;
         self.token = t.token.or(t.access_token);
@@ -368,7 +447,10 @@ async fn read_limited(resp: reqwest::Response, limit: usize) -> Result<Vec<u8>, 
 fn verify_digest(digest: &str, bytes: &[u8]) -> Result<(), OciError> {
     let actual = format!("sha256:{}", hex::encode(Sha256::digest(bytes)));
     if actual != digest {
-        return Err(OciError::DigestMismatch { digest: digest.to_owned(), actual });
+        return Err(OciError::DigestMismatch {
+            digest: digest.to_owned(),
+            actual,
+        });
     }
     Ok(())
 }
@@ -378,8 +460,14 @@ fn parse_challenge(params: &str) -> Vec<(String, String)> {
     let mut out = Vec::new();
     let mut rest = params.trim();
     while !rest.is_empty() {
-        let Some((key, after)) = rest.split_once('=') else { break };
-        let key = key.trim().trim_start_matches(',').trim().to_ascii_lowercase();
+        let Some((key, after)) = rest.split_once('=') else {
+            break;
+        };
+        let key = key
+            .trim()
+            .trim_start_matches(',')
+            .trim()
+            .to_ascii_lowercase();
         let after = after.trim_start();
         let (value, remaining) = if let Some(stripped) = after.strip_prefix('"') {
             match stripped.find('"') {
@@ -405,11 +493,30 @@ mod tests {
     #[test]
     fn parses_references() {
         let r = ImageRef::parse("python:3.12-slim").unwrap();
-        assert_eq!((r.registry.as_str(), r.repository.as_str(), r.reference.as_str()), ("registry-1.docker.io", "library/python", "3.12-slim"));
+        assert_eq!(
+            (
+                r.registry.as_str(),
+                r.repository.as_str(),
+                r.reference.as_str()
+            ),
+            ("registry-1.docker.io", "library/python", "3.12-slim")
+        );
         let r = ImageRef::parse("ubuntu").unwrap();
         assert_eq!(r.reference, "latest");
-        let r = ImageRef::parse("123456789012.dkr.ecr.us-east-1.amazonaws.com/team/app:v1").unwrap();
-        assert_eq!((r.registry.as_str(), r.repository.as_str(), r.reference.as_str()), ("123456789012.dkr.ecr.us-east-1.amazonaws.com", "team/app", "v1"));
+        let r =
+            ImageRef::parse("123456789012.dkr.ecr.us-east-1.amazonaws.com/team/app:v1").unwrap();
+        assert_eq!(
+            (
+                r.registry.as_str(),
+                r.repository.as_str(),
+                r.reference.as_str()
+            ),
+            (
+                "123456789012.dkr.ecr.us-east-1.amazonaws.com",
+                "team/app",
+                "v1"
+            )
+        );
         let d = format!("ghcr.io/weftsh/base@sha256:{}", "a".repeat(64));
         let r = ImageRef::parse(&d).unwrap();
         assert_eq!(r.reference, format!("sha256:{}", "a".repeat(64)));
@@ -419,15 +526,28 @@ mod tests {
 
     #[test]
     fn rejects_bad_references() {
-        for bad in ["", "https://x/y", "UPPER/case", "a b", "x@sha256:zz", "repo:bad tag", "repo:"] {
+        for bad in [
+            "",
+            "https://x/y",
+            "UPPER/case",
+            "a b",
+            "x@sha256:zz",
+            "repo:bad tag",
+            "repo:",
+        ] {
             assert!(ImageRef::parse(bad).is_err(), "{bad:?}");
         }
     }
 
     #[test]
     fn parses_bearer_challenges() {
-        let f = parse_challenge(r#"realm="https://auth.docker.io/token",service="registry.docker.io",scope="repository:library/python:pull""#);
-        assert_eq!(f[0], ("realm".into(), "https://auth.docker.io/token".into()));
+        let f = parse_challenge(
+            r#"realm="https://auth.docker.io/token",service="registry.docker.io",scope="repository:library/python:pull""#,
+        );
+        assert_eq!(
+            f[0],
+            ("realm".into(), "https://auth.docker.io/token".into())
+        );
         assert_eq!(f[1], ("service".into(), "registry.docker.io".into()));
         assert_eq!(f[2].1, "repository:library/python:pull");
     }

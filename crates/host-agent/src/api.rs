@@ -28,8 +28,16 @@ pub struct AppState {
 
 impl IntoResponse for ManagerError {
     fn into_response(self) -> Response {
-        let status = StatusCode::from_u16(self.status()).unwrap_or(StatusCode::INTERNAL_SERVER_ERROR);
-        (status, Json(ErrorBody { code: status.as_u16(), message: self.to_string() })).into_response()
+        let status =
+            StatusCode::from_u16(self.status()).unwrap_or(StatusCode::INTERNAL_SERVER_ERROR);
+        (
+            status,
+            Json(ErrorBody {
+                code: status.as_u16(),
+                message: self.to_string(),
+            }),
+        )
+            .into_response()
     }
 }
 
@@ -41,18 +49,33 @@ pub fn router(state: AppState) -> Router {
         .route("/v1/sandboxes/{id}/pause", post(pause))
         .route("/v1/sandboxes/{id}/egress", put(egress))
         .route("/v1/templates/{build_id}", post(build).get(build_status))
-        .layer(axum::middleware::from_fn_with_state(state.clone(), require_token))
+        .layer(axum::middleware::from_fn_with_state(
+            state.clone(),
+            require_token,
+        ))
         .with_state(state)
 }
 
-async fn require_token(State(state): State<AppState>, headers: HeaderMap, req: Request, next: Next) -> Response {
+async fn require_token(
+    State(state): State<AppState>,
+    headers: HeaderMap,
+    req: Request,
+    next: Next,
+) -> Response {
     let presented = headers
         .get("authorization")
         .and_then(|v| v.to_str().ok())
         .and_then(|v| v.strip_prefix("Bearer "))
         .unwrap_or_default();
     if !tokens_equal(presented.as_bytes(), state.token.as_bytes()) {
-        return (StatusCode::UNAUTHORIZED, Json(ErrorBody { code: 401, message: "invalid host token".into() })).into_response();
+        return (
+            StatusCode::UNAUTHORIZED,
+            Json(ErrorBody {
+                code: 401,
+                message: "invalid host token".into(),
+            }),
+        )
+            .into_response();
     }
     next.run(req).await
 }
@@ -65,40 +88,77 @@ async fn list(State(s): State<AppState>) -> Json<Vec<SandboxInfo>> {
     Json(s.manager.list())
 }
 
-async fn start(State(s): State<AppState>, Path(id): Path<String>, Json(req): Json<StartSandboxRequest>) -> Result<Json<SandboxInfo>, ManagerError> {
+async fn start(
+    State(s): State<AppState>,
+    Path(id): Path<String>,
+    Json(req): Json<StartSandboxRequest>,
+) -> Result<Json<SandboxInfo>, ManagerError> {
     s.manager.start(&id, req).await.map(Json)
 }
 
-async fn stop(State(s): State<AppState>, Path(id): Path<String>) -> Result<StatusCode, ManagerError> {
+async fn stop(
+    State(s): State<AppState>,
+    Path(id): Path<String>,
+) -> Result<StatusCode, ManagerError> {
     s.manager.stop(&id).await.map(|()| StatusCode::NO_CONTENT)
 }
 
-async fn pause(State(s): State<AppState>, Path(id): Path<String>, body: Option<Json<PauseRequest>>) -> Result<Json<PauseResult>, ManagerError> {
+async fn pause(
+    State(s): State<AppState>,
+    Path(id): Path<String>,
+    body: Option<Json<PauseRequest>>,
+) -> Result<Json<PauseResult>, ManagerError> {
     let req = body.map(|Json(b)| b).unwrap_or_default();
     s.manager.pause(&id, req).await.map(Json)
 }
 
-async fn egress(State(s): State<AppState>, Path(id): Path<String>, Json(policy): Json<UpdateEgressRequest>) -> Result<StatusCode, ManagerError> {
-    s.manager.update_egress(&id, &policy).map(|()| StatusCode::NO_CONTENT)
+async fn egress(
+    State(s): State<AppState>,
+    Path(id): Path<String>,
+    Json(policy): Json<UpdateEgressRequest>,
+) -> Result<StatusCode, ManagerError> {
+    s.manager
+        .update_egress(&id, &policy)
+        .map(|()| StatusCode::NO_CONTENT)
 }
 
-async fn build(State(s): State<AppState>, Path(build_id): Path<String>, Json(req): Json<BuildTemplateRequest>) -> Result<StatusCode, ManagerError> {
-    s.manager.start_build(&build_id, req).map(|()| StatusCode::ACCEPTED)
+async fn build(
+    State(s): State<AppState>,
+    Path(build_id): Path<String>,
+    Json(req): Json<BuildTemplateRequest>,
+) -> Result<StatusCode, ManagerError> {
+    s.manager
+        .start_build(&build_id, req)
+        .map(|()| StatusCode::ACCEPTED)
 }
 
-async fn build_status(State(s): State<AppState>, Path(build_id): Path<String>) -> Result<Json<BuildStatus>, ManagerError> {
+async fn build_status(
+    State(s): State<AppState>,
+    Path(build_id): Path<String>,
+) -> Result<Json<BuildStatus>, ManagerError> {
     s.manager.build_status(&build_id).map(Json)
 }
 
 /// Serves an axum router over TLS.
-pub async fn serve_tls(listener: tokio::net::TcpListener, tls: Arc<rustls::ServerConfig>, app: Router) {
+pub async fn serve_tls(
+    listener: tokio::net::TcpListener,
+    tls: Arc<rustls::ServerConfig>,
+    app: Router,
+) {
     let acceptor = tokio_rustls::TlsAcceptor::from(tls);
     loop {
-        let Ok((tcp, peer)) = listener.accept().await else { continue };
+        let Ok((tcp, peer)) = listener.accept().await else {
+            continue;
+        };
         let acceptor = acceptor.clone();
         let app = app.clone();
         tokio::spawn(async move {
-            let stream = match tokio::time::timeout(std::time::Duration::from_secs(10), acceptor.accept(tcp)).await {
+            let stream = match tokio::time::timeout(
+                std::time::Duration::from_secs(10),
+                acceptor.accept(tcp),
+            )
+            .await
+            {
                 Ok(Ok(s)) => s,
                 _ => {
                     tracing::debug!(%peer, "TLS handshake failed");

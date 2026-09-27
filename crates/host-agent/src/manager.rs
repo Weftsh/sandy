@@ -120,16 +120,23 @@ pub struct Manager {
     templates: Mutex<HashMap<String, TemplateMeta>>,
     template_locks: Mutex<HashMap<String, Arc<tokio::sync::Mutex<()>>>>,
     builds: Mutex<HashMap<String, Arc<Mutex<BuildStatus>>>>,
+    net_lock: tokio::sync::Mutex<()>,
 }
 
 /// Sandbox, template and build IDs become paths, interface names and
 /// hostnames, so they are restricted to a safe alphabet.
 pub fn validate_id(kind: &str, id: &str) -> Result<()> {
-    let ok = !id.is_empty() && id.len() <= 64 && id.bytes().all(|b| b.is_ascii_lowercase() || b.is_ascii_digit() || b == b'-');
+    let ok = !id.is_empty()
+        && id.len() <= 64
+        && id
+            .bytes()
+            .all(|b| b.is_ascii_lowercase() || b.is_ascii_digit() || b == b'-');
     if ok && !id.starts_with('-') {
         Ok(())
     } else {
-        Err(ManagerError::BadRequest(format!("invalid {kind} id {id:?}: use 1-64 lowercase letters, digits and dashes")))
+        Err(ManagerError::BadRequest(format!(
+            "invalid {kind} id {id:?}: use 1-64 lowercase letters, digits and dashes"
+        )))
     }
 }
 
@@ -152,6 +159,7 @@ impl Manager {
             templates: Mutex::default(),
             template_locks: Mutex::default(),
             builds: Mutex::default(),
+            net_lock: tokio::sync::Mutex::new(()),
         }
     }
 
@@ -161,7 +169,9 @@ impl Manager {
 
     /// Removes leftovers from a previous run and loads cached templates.
     pub async fn recover(&self) -> Result<()> {
-        run_all(&self.runner, &net::host_plan(self.slots.net())).await.map_err(internal)?;
+        run_all(&self.runner, &net::host_plan(self.slots.net()))
+            .await
+            .map_err(internal)?;
         self.runtime.cleanup_leftovers().await;
         // Sandboxes do not survive an agent restart: the control plane sees
         // them missing from the next heartbeat and marks them stopped.
@@ -176,7 +186,8 @@ impl Manager {
         let sandboxes = self.cfg.data_dir.join("sandboxes");
         if let Ok(mut rd) = tokio::fs::read_dir(&sandboxes).await {
             while let Ok(Some(e)) = rd.next_entry().await {
-                let _ = nix::mount::umount2(&e.path().join("rootfs"), nix::mount::MntFlags::MNT_DETACH);
+                let _ =
+                    nix::mount::umount2(&e.path().join("rootfs"), nix::mount::MntFlags::MNT_DETACH);
             }
         }
         let _ = tokio::fs::remove_dir_all(&sandboxes).await;
@@ -187,9 +198,16 @@ impl Manager {
         let mut rd = tokio::fs::read_dir(&dir).await.map_err(internal)?;
         while let Ok(Some(e)) = rd.next_entry().await {
             let meta_path = e.path().join("template.json");
-            match tokio::fs::read(&meta_path).await.ok().and_then(|b| serde_json::from_slice::<TemplateMeta>(&b).ok()) {
+            match tokio::fs::read(&meta_path)
+                .await
+                .ok()
+                .and_then(|b| serde_json::from_slice::<TemplateMeta>(&b).ok())
+            {
                 Some(meta) => {
-                    self.templates.lock().expect("poisoned").insert(meta.build_id.clone(), meta);
+                    self.templates
+                        .lock()
+                        .expect("poisoned")
+                        .insert(meta.build_id.clone(), meta);
                 }
                 None => {
                     // An interrupted build or download.
@@ -206,23 +224,39 @@ impl Manager {
         validate_id("sandbox", id)?;
         validate_id("build", &req.build_id)?;
         if req.vcpus == 0 || req.vcpus > self.cfg.max_vcpus {
-            return Err(ManagerError::BadRequest(format!("vcpus must be 1-{}", self.cfg.max_vcpus)));
+            return Err(ManagerError::BadRequest(format!(
+                "vcpus must be 1-{}",
+                self.cfg.max_vcpus
+            )));
         }
         if req.memory_mib < 128 || req.memory_mib > self.cfg.max_memory_mib {
-            return Err(ManagerError::BadRequest(format!("memoryMib must be 128-{}", self.cfg.max_memory_mib)));
+            return Err(ManagerError::BadRequest(format!(
+                "memoryMib must be 128-{}",
+                self.cfg.max_memory_mib
+            )));
         }
         if req.envd_access_token.len() < 16 {
-            return Err(ManagerError::BadRequest("envdAccessToken is too short".into()));
+            return Err(ManagerError::BadRequest(
+                "envdAccessToken is too short".into(),
+            ));
         }
-        let policy = Arc::new(CompiledPolicy::compile(&req.egress).map_err(|e| ManagerError::BadRequest(e.to_string()))?);
+        let policy = Arc::new(
+            CompiledPolicy::compile(&req.egress)
+                .map_err(|e| ManagerError::BadRequest(e.to_string()))?,
+        );
 
         let existing = self.sandboxes.lock().expect("poisoned").get(id).cloned();
         if let Some(sb) = existing {
             return self.resume_existing(&sb, &req).await;
         }
 
-        let template = self.ensure_template(&req.build_id, req.template_artifacts.as_ref()).await?;
-        let slot = self.slots.reserve().ok_or_else(|| ManagerError::Capacity("host is full".into()))?;
+        let template = self
+            .ensure_template(&req.build_id, req.template_artifacts.as_ref())
+            .await?;
+        let slot = self
+            .slots
+            .reserve()
+            .ok_or_else(|| ManagerError::Capacity("host is full".into()))?;
         let link = self.runtime.guest_link(&slot);
         let sb = Arc::new(Sandbox {
             id: id.to_owned(),
@@ -267,14 +301,28 @@ impl Manager {
         template: &LocalTemplate,
         policy: Arc<CompiledPolicy>,
     ) -> Result<(Handle, String)> {
-        run_all(&self.runner, &net::teardown_plan(&sb.slot, &sb.link)).await.map_err(internal)?;
-        run_all(&self.runner, &net::setup_plan(self.slots.net(), &sb.slot, &sb.link)).await.map_err(internal)?;
-        self.slots.occupy(sb.slot.index, SlotEntry { sandbox_id: sb.id.clone(), policy });
+        self.net_plan(&net::teardown_plan(&sb.slot, &sb.link))
+            .await
+            .map_err(internal)?;
+        self.net_plan(&net::setup_plan(self.slots.net(), &sb.slot, &sb.link))
+            .await
+            .map_err(internal)?;
+        self.slots.occupy(
+            sb.slot.index,
+            SlotEntry {
+                sandbox_id: sb.id.clone(),
+                policy,
+            },
+        );
 
         let snapshot = match &req.resume {
-            Some(ResumeSource::Remote { snapshot }) => Some(self.download_snapshot(&sb.id, snapshot).await?),
+            Some(ResumeSource::Remote { snapshot }) => {
+                Some(self.download_snapshot(&sb.id, snapshot).await?)
+            }
             Some(ResumeSource::Local) => {
-                return Err(ManagerError::NotFound("paused sandbox is not on this host".into()));
+                return Err(ManagerError::NotFound(
+                    "paused sandbox is not on this host".into(),
+                ));
             }
             None => None,
         };
@@ -308,7 +356,10 @@ impl Manager {
 
     async fn init_envd(&self, sb: &Sandbox, req: &StartSandboxRequest) -> Result<String> {
         let addr = SocketAddr::new(sb.slot.ns_ip.into(), ENVD_PORT);
-        self.envd.wait_healthy(addr, ENVD_READY_TIMEOUT).await.map_err(internal)?;
+        self.envd
+            .wait_healthy(addr, ENVD_READY_TIMEOUT)
+            .await
+            .map_err(internal)?;
         let mut env_vars: BTreeMap<String, String> = req.env_vars.clone();
         env_vars.insert("E2B_SANDBOX_ID".into(), sb.id.clone());
         env_vars.insert("E2B_TEMPLATE_ID".into(), req.template_id.clone());
@@ -316,15 +367,28 @@ impl Manager {
         if req.ca_bundle.is_some() {
             // Runtimes that ignore the system store still trust the egress CA.
             let bundle = "/etc/ssl/certs/ca-certificates.crt".to_owned();
-            env_vars.entry("SSL_CERT_FILE".into()).or_insert_with(|| bundle.clone());
-            env_vars.entry("REQUESTS_CA_BUNDLE".into()).or_insert_with(|| bundle.clone());
-            env_vars.entry("NODE_EXTRA_CA_CERTS".into()).or_insert(bundle);
+            env_vars
+                .entry("SSL_CERT_FILE".into())
+                .or_insert_with(|| bundle.clone());
+            env_vars
+                .entry("REQUESTS_CA_BUNDLE".into())
+                .or_insert_with(|| bundle.clone());
+            env_vars
+                .entry("NODE_EXTRA_CA_CERTS".into())
+                .or_insert(bundle);
         }
         let init = InitRequest {
             access_token: req.envd_access_token.clone(),
             env_vars,
-            default_user: Some(req.default_user.clone().unwrap_or_else(|| rootfs::SANDBOX_USER.to_owned())),
-            default_workdir: req.default_workdir.clone().or_else(|| Some(format!("/home/{}", rootfs::SANDBOX_USER))),
+            default_user: Some(
+                req.default_user
+                    .clone()
+                    .unwrap_or_else(|| rootfs::SANDBOX_USER.to_owned()),
+            ),
+            default_workdir: req
+                .default_workdir
+                .clone()
+                .or_else(|| Some(format!("/home/{}", rootfs::SANDBOX_USER))),
             timestamp: self.runtime.sets_guest_clock().then(now_rfc3339),
             ca_bundle: req.ca_bundle.clone(),
         };
@@ -333,26 +397,50 @@ impl Manager {
 
     /// Microvm templates ran their start command before the snapshot. The
     /// namespace runtime cannot snapshot processes, so it runs it per sandbox.
-    async fn run_template_commands(&self, sb: &Sandbox, req: &StartSandboxRequest, template: &LocalTemplate) -> Result<()> {
+    async fn run_template_commands(
+        &self,
+        sb: &Sandbox,
+        req: &StartSandboxRequest,
+        template: &LocalTemplate,
+    ) -> Result<()> {
         if !matches!(self.runtime, Runtime::Namespace(_)) {
             return Ok(());
         }
-        let meta = self.templates.lock().expect("poisoned").get(&template.build_id).cloned();
+        let meta = self
+            .templates
+            .lock()
+            .expect("poisoned")
+            .get(&template.build_id)
+            .cloned();
         let Some(meta) = meta else { return Ok(()) };
         let addr = SocketAddr::new(sb.slot.ns_ip.into(), ENVD_PORT);
         let token = Some(req.envd_access_token.as_str());
         if let Some(start) = &meta.start_cmd {
-            let bg = format!("nohup sh -c {} >/tmp/weft-start.log 2>&1 &", shell_quote(start));
-            self.envd.run(addr, token, "root", &bg, Duration::from_secs(30)).await.map_err(internal)?;
+            let bg = format!(
+                "nohup sh -c {} >/tmp/weft-start.log 2>&1 &",
+                shell_quote(start)
+            );
+            self.envd
+                .run(addr, token, "root", &bg, Duration::from_secs(30))
+                .await
+                .map_err(internal)?;
         }
         if let Some(ready) = &meta.ready_cmd {
             let deadline = tokio::time::Instant::now() + READY_CMD_TIMEOUT;
             loop {
-                if self.envd.run(addr, token, "root", ready, Duration::from_secs(30)).await.map_err(internal)? == 0 {
+                if self
+                    .envd
+                    .run(addr, token, "root", ready, Duration::from_secs(30))
+                    .await
+                    .map_err(internal)?
+                    == 0
+                {
                     break;
                 }
                 if tokio::time::Instant::now() > deadline {
-                    return Err(ManagerError::Internal("template ready command did not succeed in time".into()));
+                    return Err(ManagerError::Internal(
+                        "template ready command did not succeed in time".into(),
+                    ));
                 }
                 tokio::time::sleep(Duration::from_millis(500)).await;
             }
@@ -360,12 +448,18 @@ impl Manager {
         Ok(())
     }
 
-    async fn resume_existing(&self, sb: &Arc<Sandbox>, req: &StartSandboxRequest) -> Result<SandboxInfo> {
+    async fn resume_existing(
+        &self,
+        sb: &Arc<Sandbox>,
+        req: &StartSandboxRequest,
+    ) -> Result<SandboxInfo> {
         let guard = sb.op.lock().await;
         match (sb.state(), &req.resume) {
             (SandboxState::Running, _) => Ok(sb.info()),
             (SandboxState::Paused, Some(ResumeSource::Local)) => {
-                let handle = guard.as_ref().ok_or_else(|| internal("paused sandbox has no handle"))?;
+                let handle = guard
+                    .as_ref()
+                    .ok_or_else(|| internal("paused sandbox has no handle"))?;
                 self.runtime.thaw(handle).await.map_err(internal)?;
                 sb.set_state(SandboxState::Running);
                 Ok(sb.info())
@@ -377,7 +471,13 @@ impl Manager {
     /// Stops every sandbox. Called on shutdown: a restarted agent cannot
     /// re-adopt running guests, so it must not leave them behind.
     pub async fn shutdown(&self) {
-        let ids: Vec<String> = self.sandboxes.lock().expect("poisoned").keys().cloned().collect();
+        let ids: Vec<String> = self
+            .sandboxes
+            .lock()
+            .expect("poisoned")
+            .keys()
+            .cloned()
+            .collect();
         for id in ids {
             self.remove(&id).await;
         }
@@ -390,7 +490,9 @@ impl Manager {
     }
 
     async fn remove(&self, id: &str) {
-        let Some(sb) = self.sandboxes.lock().expect("poisoned").remove(id) else { return };
+        let Some(sb) = self.sandboxes.lock().expect("poisoned").remove(id) else {
+            return;
+        };
         sb.set_state(SandboxState::Stopping);
         let mut guard = sb.op.lock().await;
         if let Some(handle) = guard.take() {
@@ -403,10 +505,21 @@ impl Manager {
     }
 
     async fn release_slot(&self, sb: &Sandbox) {
-        self.slots.release(sb.slot.index);
-        if let Err(e) = run_all(&self.runner, &net::teardown_plan(&sb.slot, &sb.link)).await {
+        self.slots.vacate(sb.slot.index);
+        if let Err(e) = self.net_plan(&net::teardown_plan(&sb.slot, &sb.link)).await {
             tracing::warn!(sandbox = %sb.id, error = %e, "network teardown failed");
         }
+        self.slots.release(sb.slot.index);
+    }
+
+    /// Runs a network plan. Plans run one at a time: `ip netns add/del`
+    /// racing each other can fail spuriously.
+    async fn net_plan(
+        &self,
+        plan: &[crate::cmd::Cmd],
+    ) -> std::result::Result<(), crate::cmd::CmdError> {
+        let _guard = self.net_lock.lock().await;
+        run_all(&self.runner, plan).await
     }
 
     pub async fn pause(&self, id: &str, req: PauseRequest) -> Result<PauseResult> {
@@ -414,13 +527,19 @@ impl Manager {
         let mut guard = sb.op.lock().await;
         match sb.state() {
             SandboxState::Running => {}
-            SandboxState::Paused => return Err(ManagerError::Conflict("sandbox is already paused".into())),
+            SandboxState::Paused => {
+                return Err(ManagerError::Conflict("sandbox is already paused".into()))
+            }
             other => return Err(ManagerError::Conflict(format!("sandbox is {other:?}"))),
         }
-        let handle = guard.take().ok_or_else(|| internal("running sandbox has no handle"))?;
+        let handle = guard
+            .take()
+            .ok_or_else(|| internal("running sandbox has no handle"))?;
         sb.set_state(SandboxState::Pausing);
         let work_dir = self.cfg.data_dir.join("sandboxes").join(id).join("pause");
-        tokio::fs::create_dir_all(&work_dir).await.map_err(internal)?;
+        tokio::fs::create_dir_all(&work_dir)
+            .await
+            .map_err(internal)?;
         match self.runtime.pause(handle, &work_dir).await {
             Ok(Paused::Frozen(h)) => {
                 *guard = Some(h);
@@ -431,7 +550,9 @@ impl Manager {
                 drop(guard);
                 let result = match &req.upload {
                     Some(targets) => self.upload_snapshot(&files, targets).await,
-                    None => Err(ManagerError::BadRequest("this runtime needs upload targets to pause".into())),
+                    None => Err(ManagerError::BadRequest(
+                        "this runtime needs upload targets to pause".into(),
+                    )),
                 };
                 self.remove(id).await;
                 result
@@ -444,26 +565,60 @@ impl Manager {
         }
     }
 
-    async fn upload_snapshot(&self, files: &SnapshotFiles, t: &UploadTargets) -> Result<PauseResult> {
-        let rootfs = self.transfer.upload(&files.rootfs, &t.rootfs).await.map_err(internal)?;
-        let memory = self.transfer.upload(&files.memory, &t.memory).await.map_err(internal)?;
-        let vmstate = self.transfer.upload(&files.vmstate, &t.vmstate).await.map_err(internal)?;
-        Ok(PauseResult::Uploaded { rootfs, memory, vmstate })
+    async fn upload_snapshot(
+        &self,
+        files: &SnapshotFiles,
+        t: &UploadTargets,
+    ) -> Result<PauseResult> {
+        let rootfs = self
+            .transfer
+            .upload(&files.rootfs, &t.rootfs)
+            .await
+            .map_err(internal)?;
+        let memory = self
+            .transfer
+            .upload(&files.memory, &t.memory)
+            .await
+            .map_err(internal)?;
+        let vmstate = self
+            .transfer
+            .upload(&files.vmstate, &t.vmstate)
+            .await
+            .map_err(internal)?;
+        Ok(PauseResult::Uploaded {
+            rootfs,
+            memory,
+            vmstate,
+        })
     }
 
     async fn download_snapshot(&self, id: &str, s: &SnapshotArtifacts) -> Result<SnapshotFiles> {
         let dir = self.cfg.data_dir.join("sandboxes").join(id).join("resume");
         tokio::fs::create_dir_all(&dir).await.map_err(internal)?;
-        let files = SnapshotFiles { rootfs: dir.join("rootfs.ext4"), memory: dir.join("memory"), vmstate: dir.join("vmstate") };
-        self.transfer.download(&s.rootfs, &files.rootfs).await.map_err(internal)?;
-        self.transfer.download(&s.memory, &files.memory).await.map_err(internal)?;
-        self.transfer.download(&s.vmstate, &files.vmstate).await.map_err(internal)?;
+        let files = SnapshotFiles {
+            rootfs: dir.join("rootfs.ext4"),
+            memory: dir.join("memory"),
+            vmstate: dir.join("vmstate"),
+        };
+        self.transfer
+            .download(&s.rootfs, &files.rootfs)
+            .await
+            .map_err(internal)?;
+        self.transfer
+            .download(&s.memory, &files.memory)
+            .await
+            .map_err(internal)?;
+        self.transfer
+            .download(&s.vmstate, &files.vmstate)
+            .await
+            .map_err(internal)?;
         Ok(files)
     }
 
     pub fn update_egress(&self, id: &str, policy: &EgressPolicy) -> Result<()> {
         let sb = self.get(id)?;
-        let compiled = CompiledPolicy::compile(policy).map_err(|e| ManagerError::BadRequest(e.to_string()))?;
+        let compiled =
+            CompiledPolicy::compile(policy).map_err(|e| ManagerError::BadRequest(e.to_string()))?;
         self.slots.set_policy(sb.slot.index, Arc::new(compiled));
         Ok(())
     }
@@ -479,7 +634,13 @@ impl Manager {
     }
 
     pub fn list(&self) -> Vec<SandboxInfo> {
-        let mut v: Vec<SandboxInfo> = self.sandboxes.lock().expect("poisoned").values().map(|s| s.info()).collect();
+        let mut v: Vec<SandboxInfo> = self
+            .sandboxes
+            .lock()
+            .expect("poisoned")
+            .values()
+            .map(|s| s.info())
+            .collect();
         v.sort_by(|a, b| a.sandbox_id.cmp(&b.sandbox_id));
         v
     }
@@ -494,43 +655,104 @@ impl Manager {
     }
 
     pub fn cached_templates(&self) -> Vec<String> {
-        let mut v: Vec<String> = self.templates.lock().expect("poisoned").keys().cloned().collect();
+        let mut v: Vec<String> = self
+            .templates
+            .lock()
+            .expect("poisoned")
+            .keys()
+            .cloned()
+            .collect();
         v.sort();
         v
     }
 
     // ---- templates ---------------------------------------------------------
 
-    async fn ensure_template(&self, build_id: &str, artifacts: Option<&TemplateArtifacts>) -> Result<LocalTemplate> {
+    async fn ensure_template(
+        &self,
+        build_id: &str,
+        artifacts: Option<&TemplateArtifacts>,
+    ) -> Result<LocalTemplate> {
         let dir = self.cfg.data_dir.join("templates").join(build_id);
-        if self.templates.lock().expect("poisoned").contains_key(build_id) {
-            return Ok(LocalTemplate { build_id: build_id.to_owned(), dir });
+        if self
+            .templates
+            .lock()
+            .expect("poisoned")
+            .contains_key(build_id)
+        {
+            return Ok(LocalTemplate {
+                build_id: build_id.to_owned(),
+                dir,
+            });
         }
         let Some(artifacts) = artifacts else {
-            return Err(ManagerError::Conflict(format!("template build {build_id} is not on this host")));
+            return Err(ManagerError::Conflict(format!(
+                "template build {build_id} is not on this host"
+            )));
         };
-        let lock = self.template_locks.lock().expect("poisoned").entry(build_id.to_owned()).or_default().clone();
+        let lock = self
+            .template_locks
+            .lock()
+            .expect("poisoned")
+            .entry(build_id.to_owned())
+            .or_default()
+            .clone();
         let _held = lock.lock().await;
-        if self.templates.lock().expect("poisoned").contains_key(build_id) {
-            return Ok(LocalTemplate { build_id: build_id.to_owned(), dir });
+        if self
+            .templates
+            .lock()
+            .expect("poisoned")
+            .contains_key(build_id)
+        {
+            return Ok(LocalTemplate {
+                build_id: build_id.to_owned(),
+                dir,
+            });
         }
-        let partial = self.cfg.data_dir.join("templates").join(format!("{build_id}.partial"));
+        let partial = self
+            .cfg
+            .data_dir
+            .join("templates")
+            .join(format!("{build_id}.partial"));
         let _ = tokio::fs::remove_dir_all(&partial).await;
-        tokio::fs::create_dir_all(&partial).await.map_err(internal)?;
-        self.transfer.download(&artifacts.rootfs, &partial.join("rootfs.ext4")).await.map_err(internal)?;
-        self.transfer.download(&artifacts.memory, &partial.join("memory")).await.map_err(internal)?;
-        self.transfer.download(&artifacts.vmstate, &partial.join("vmstate")).await.map_err(internal)?;
-        let meta = TemplateMeta { build_id: build_id.to_owned(), start_cmd: None, ready_cmd: None };
+        tokio::fs::create_dir_all(&partial)
+            .await
+            .map_err(internal)?;
+        self.transfer
+            .download(&artifacts.rootfs, &partial.join("rootfs.ext4"))
+            .await
+            .map_err(internal)?;
+        self.transfer
+            .download(&artifacts.memory, &partial.join("memory"))
+            .await
+            .map_err(internal)?;
+        self.transfer
+            .download(&artifacts.vmstate, &partial.join("vmstate"))
+            .await
+            .map_err(internal)?;
+        let meta = TemplateMeta {
+            build_id: build_id.to_owned(),
+            start_cmd: None,
+            ready_cmd: None,
+        };
         self.commit_template(&partial, &dir, meta).await?;
-        Ok(LocalTemplate { build_id: build_id.to_owned(), dir })
+        Ok(LocalTemplate {
+            build_id: build_id.to_owned(),
+            dir,
+        })
     }
 
     async fn commit_template(&self, partial: &Path, dir: &Path, meta: TemplateMeta) -> Result<()> {
         let json = serde_json::to_vec_pretty(&meta).map_err(internal)?;
-        tokio::fs::write(partial.join("template.json"), json).await.map_err(internal)?;
+        tokio::fs::write(partial.join("template.json"), json)
+            .await
+            .map_err(internal)?;
         let _ = tokio::fs::remove_dir_all(dir).await;
         tokio::fs::rename(partial, dir).await.map_err(internal)?;
-        self.templates.lock().expect("poisoned").insert(meta.build_id.clone(), meta);
+        self.templates
+            .lock()
+            .expect("poisoned")
+            .insert(meta.build_id.clone(), meta);
         Ok(())
     }
 
@@ -547,11 +769,19 @@ impl Manager {
     /// Starts a template build in the background.
     pub fn start_build(self: &Arc<Self>, build_id: &str, req: BuildTemplateRequest) -> Result<()> {
         validate_id("build", build_id)?;
-        if req.vcpus == 0 || req.vcpus > self.cfg.max_vcpus || req.memory_mib < 128 || req.memory_mib > self.cfg.max_memory_mib {
-            return Err(ManagerError::BadRequest("vcpus or memoryMib out of range".into()));
+        if req.vcpus == 0
+            || req.vcpus > self.cfg.max_vcpus
+            || req.memory_mib < 128
+            || req.memory_mib > self.cfg.max_memory_mib
+        {
+            return Err(ManagerError::BadRequest(
+                "vcpus or memoryMib out of range".into(),
+            ));
         }
         if req.disk_mib < 512 {
-            return Err(ManagerError::BadRequest("diskMib must be at least 512".into()));
+            return Err(ManagerError::BadRequest(
+                "diskMib must be at least 512".into(),
+            ));
         }
         let status = Arc::new(Mutex::new(BuildStatus {
             build_id: build_id.to_owned(),
@@ -567,7 +797,9 @@ impl Manager {
             let mut builds = self.builds.lock().expect("poisoned");
             if let Some(existing) = builds.get(build_id) {
                 if existing.lock().expect("poisoned").status != BuildState::Failed {
-                    return Err(ManagerError::Conflict(format!("build {build_id} already exists")));
+                    return Err(ManagerError::Conflict(format!(
+                        "build {build_id} already exists"
+                    )));
                 }
             }
             builds.insert(build_id.to_owned(), status.clone());
@@ -585,7 +817,8 @@ impl Manager {
                 }
             };
             let result = this.run_build(&build_id, &req, &log).await;
-            let _ = tokio::fs::remove_dir_all(this.cfg.data_dir.join("builds").join(&build_id)).await;
+            let _ =
+                tokio::fs::remove_dir_all(this.cfg.data_dir.join("builds").join(&build_id)).await;
             let mut s = status.lock().expect("poisoned");
             match result {
                 Ok((env, workdir, artifacts)) => {
@@ -611,17 +844,33 @@ impl Manager {
         build_id: &str,
         req: &BuildTemplateRequest,
         log: &(dyn Fn(String) + Send + Sync),
-    ) -> Result<(BTreeMap<String, String>, Option<String>, Option<BuiltArtifacts>)> {
+    ) -> Result<(
+        BTreeMap<String, String>,
+        Option<String>,
+        Option<BuiltArtifacts>,
+    )> {
         let work = self.cfg.data_dir.join("builds").join(build_id);
         let layers_dir = work.join("layers");
         let rootfs_dir = work.join("rootfs");
-        tokio::fs::create_dir_all(&rootfs_dir).await.map_err(internal)?;
+        tokio::fs::create_dir_all(&rootfs_dir)
+            .await
+            .map_err(internal)?;
 
-        let image = ImageRef::parse(&req.image.reference).map_err(|e| ManagerError::BadRequest(e.to_string()))?;
-        log(format!("pulling {}/{}:{}", image.registry, image.repository, image.reference));
-        let creds = Credentials { username: req.image.username.clone(), password: req.image.password.clone() };
+        let image = ImageRef::parse(&req.image.reference)
+            .map_err(|e| ManagerError::BadRequest(e.to_string()))?;
+        log(format!(
+            "pulling {}/{}:{}",
+            image.registry, image.repository, image.reference
+        ));
+        let creds = Credentials {
+            username: req.image.username.clone(),
+            password: req.image.password.clone(),
+        };
         let mut puller = Puller::new(creds).map_err(internal)?;
-        let pulled = puller.pull(&image, &layers_dir).await.map_err(|e| ManagerError::BadRequest(format!("pulling image: {e}")))?;
+        let pulled = puller
+            .pull(&image, &layers_dir)
+            .await
+            .map_err(|e| ManagerError::BadRequest(format!("pulling image: {e}")))?;
         log(format!("unpacking {} layers", pulled.layers.len()));
         let agent = std::env::current_exe().map_err(internal)?;
         for layer in &pulled.layers {
@@ -641,40 +890,84 @@ impl Manager {
             }
             let _ = tokio::fs::remove_file(&layer.path).await;
         }
-        rootfs::prepare(&rootfs_dir, &self.cfg.guest_dir).map_err(|e| ManagerError::BadRequest(e.to_string()))?;
+        rootfs::prepare(&rootfs_dir, &self.cfg.guest_dir)
+            .map_err(|e| ManagerError::BadRequest(e.to_string()))?;
 
         let mut env = rootfs::parse_env(pulled.config.env.as_deref().unwrap_or_default());
         env.extend(req.env_vars.clone());
-        let workdir = pulled.config.working_dir.filter(|w| !w.is_empty() && w != "/");
+        let workdir = pulled
+            .config
+            .working_dir
+            .filter(|w| !w.is_empty() && w != "/");
 
-        let partial = self.cfg.data_dir.join("templates").join(format!("{build_id}.partial"));
+        let partial = self
+            .cfg
+            .data_dir
+            .join("templates")
+            .join(format!("{build_id}.partial"));
         let _ = tokio::fs::remove_dir_all(&partial).await;
-        let slot = self.slots.reserve().ok_or_else(|| ManagerError::Capacity("host is full".into()))?;
+        let slot = self
+            .slots
+            .reserve()
+            .ok_or_else(|| ManagerError::Capacity("host is full".into()))?;
         let link = self.runtime.guest_link(&slot);
         let finished = async {
-            run_all(&self.runner, &net::teardown_plan(&slot, &link)).await.map_err(internal)?;
-            run_all(&self.runner, &net::setup_plan(self.slots.net(), &slot, &link)).await.map_err(internal)?;
-            self.slots.occupy(slot.index, SlotEntry { sandbox_id: format!("build-{build_id}"), policy: Arc::new(CompiledPolicy::deny_all()) });
-            log(format!("finishing template with the {} runtime", self.runtime.name()));
-            self.runtime.finish_template(req, build_id, &rootfs_dir, &partial, &slot, log).await.map_err(internal)
+            self.net_plan(&net::teardown_plan(&slot, &link))
+                .await
+                .map_err(internal)?;
+            self.net_plan(&net::setup_plan(self.slots.net(), &slot, &link))
+                .await
+                .map_err(internal)?;
+            self.slots.occupy(
+                slot.index,
+                SlotEntry {
+                    sandbox_id: format!("build-{build_id}"),
+                    policy: Arc::new(CompiledPolicy::deny_all()),
+                },
+            );
+            log(format!(
+                "finishing template with the {} runtime",
+                self.runtime.name()
+            ));
+            self.runtime
+                .finish_template(req, build_id, &rootfs_dir, &partial, &slot, log)
+                .await
+                .map_err(internal)
         }
         .await;
+        self.slots.vacate(slot.index);
+        let _ = self.net_plan(&net::teardown_plan(&slot, &link)).await;
         self.slots.release(slot.index);
-        let _ = run_all(&self.runner, &net::teardown_plan(&slot, &link)).await;
         finished?;
 
         let artifacts = match &req.upload {
             Some(t) => {
                 log("uploading template artifacts".into());
                 Some(BuiltArtifacts {
-                    rootfs: self.transfer.upload(&partial.join("rootfs.ext4"), &t.rootfs).await.map_err(internal)?,
-                    memory: self.transfer.upload(&partial.join("memory"), &t.memory).await.map_err(internal)?,
-                    vmstate: self.transfer.upload(&partial.join("vmstate"), &t.vmstate).await.map_err(internal)?,
+                    rootfs: self
+                        .transfer
+                        .upload(&partial.join("rootfs.ext4"), &t.rootfs)
+                        .await
+                        .map_err(internal)?,
+                    memory: self
+                        .transfer
+                        .upload(&partial.join("memory"), &t.memory)
+                        .await
+                        .map_err(internal)?,
+                    vmstate: self
+                        .transfer
+                        .upload(&partial.join("vmstate"), &t.vmstate)
+                        .await
+                        .map_err(internal)?,
                 })
             }
             None => None,
         };
-        let meta = TemplateMeta { build_id: build_id.to_owned(), start_cmd: req.start_cmd.clone(), ready_cmd: req.ready_cmd.clone() };
+        let meta = TemplateMeta {
+            build_id: build_id.to_owned(),
+            start_cmd: req.start_cmd.clone(),
+            ready_cmd: req.ready_cmd.clone(),
+        };
         let dir = self.cfg.data_dir.join("templates").join(build_id);
         self.commit_template(&partial, &dir, meta).await?;
         Ok((env, workdir, artifacts))
@@ -687,8 +980,14 @@ impl Manager {
             version: version.to_owned(),
             runtime: self.runtime.name().to_owned(),
             capacity,
-            running: list.iter().filter(|s| s.state == SandboxState::Running).count() as u32,
-            paused: list.iter().filter(|s| s.state == SandboxState::Paused).count() as u32,
+            running: list
+                .iter()
+                .filter(|s| s.state == SandboxState::Running)
+                .count() as u32,
+            paused: list
+                .iter()
+                .filter(|s| s.state == SandboxState::Paused)
+                .count() as u32,
         }
     }
 }
@@ -706,7 +1005,16 @@ mod tests {
     fn validates_ids() {
         assert!(validate_id("sandbox", "i7x2k9q3m1").is_ok());
         assert!(validate_id("build", "b-123").is_ok());
-        for bad in ["", "UPPER", "a/b", "-lead", "a b", &"x".repeat(65), "../x", "a.b"] {
+        for bad in [
+            "",
+            "UPPER",
+            "a/b",
+            "-lead",
+            "a b",
+            &"x".repeat(65),
+            "../x",
+            "a.b",
+        ] {
             assert!(validate_id("sandbox", bad).is_err(), "{bad:?}");
         }
     }

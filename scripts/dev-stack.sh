@@ -95,8 +95,9 @@ up() {
 
   # Throwaway development secrets, regenerated on every start.
   export WEFT_DEV_MODE=1
-  export WEFT_DEV_TOKEN="dev-$(openssl rand -hex 24)"
-  export WEFT_BOOTSTRAP_ADMIN_KEY="weft_sk_dev_$(openssl rand -hex 24)"
+  WEFT_DEV_TOKEN="dev-$(openssl rand -hex 24)"
+  WEFT_BOOTSTRAP_ADMIN_KEY="weft_sk_dev_$(openssl rand -hex 24)"
+  export WEFT_DEV_TOKEN WEFT_BOOTSTRAP_ADMIN_KEY
   export WEFT_BOOTSTRAP_TEMPLATES="base=$BASE_IMAGE"
   export WEFT_API_LISTEN="127.0.0.1:$API_PORT"
   gen_ca "$STATE" egress-ca "Weft Sandboxes development egress CA"
@@ -110,7 +111,8 @@ up() {
   printf 'subjectAltName=DNS:echo.weft.test\nextendedKeyUsage=serverAuth\n' > "$STATE/echo.ext"
   openssl x509 -req -in "$STATE/echo.csr" -CA "$STATE/upstream-ca.pem" -CAkey "$STATE/upstream-ca.key.pem" -CAcreateserial \
     -days 30 -sha256 -extfile "$STATE/echo.ext" -out "$STATE/echo.pem" 2>/dev/null
-  local echo_secret="echo-secret-$(openssl rand -hex 16)"
+  local echo_secret
+  echo_secret="echo-secret-$(openssl rand -hex 16)"
   printf '{"weft-dev-echo-secret": "%s"}\n' "$echo_secret" > "$STATE/dev-secrets.json"
   chmod 600 "$STATE/dev-secrets.json" "$STATE"/*.key.pem
 

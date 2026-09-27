@@ -52,27 +52,46 @@ impl Transfer {
     }
 
     /// Compresses `src` next to itself, uploads it and removes the compressed copy.
-    pub async fn upload(&self, src: &Path, target: &UploadTarget) -> Result<UploadedArtifact, ArtifactError> {
+    pub async fn upload(
+        &self,
+        src: &Path,
+        target: &UploadTarget,
+    ) -> Result<UploadedArtifact, ArtifactError> {
         let compressed = src.with_extension("zst.upload");
         let (sha256, size) = compress_file(src, &compressed).await?;
         let result = self.upload_compressed(&compressed, size, target).await;
         let _ = tokio::fs::remove_file(&compressed).await;
         let parts = result?;
-        Ok(UploadedArtifact { sha256, size, parts })
+        Ok(UploadedArtifact {
+            sha256,
+            size,
+            parts,
+        })
     }
 
-    async fn upload_compressed(&self, path: &Path, size: u64, target: &UploadTarget) -> Result<Vec<UploadedPart>, ArtifactError> {
+    async fn upload_compressed(
+        &self,
+        path: &Path,
+        size: u64,
+        target: &UploadTarget,
+    ) -> Result<Vec<UploadedPart>, ArtifactError> {
         match target {
             UploadTarget::Put { url } => {
                 let body = tokio::fs::read(path).await?;
                 self.put(url, body).await?;
                 Ok(Vec::new())
             }
-            UploadTarget::Multipart { part_size, part_urls } => {
+            UploadTarget::Multipart {
+                part_size,
+                part_urls,
+            } => {
                 let part_size = (*part_size).max(5 * 1024 * 1024);
                 let needed = size.div_ceil(part_size).max(1) as usize;
                 if needed > part_urls.len() {
-                    return Err(ArtifactError::TooManyParts { size, parts: part_urls.len() });
+                    return Err(ArtifactError::TooManyParts {
+                        size,
+                        parts: part_urls.len(),
+                    });
                 }
                 let mut file = tokio::fs::File::open(path).await?;
                 let mut parts = Vec::with_capacity(needed);
@@ -83,8 +102,14 @@ impl Transfer {
                     file.seek(SeekFrom::Start(offset)).await?;
                     file.read_exact(&mut buf).await?;
                     let number = i as u32 + 1;
-                    let etag = self.put(url, buf).await?.ok_or(ArtifactError::MissingEtag(number))?;
-                    parts.push(UploadedPart { part_number: number, etag });
+                    let etag = self
+                        .put(url, buf)
+                        .await?
+                        .ok_or(ArtifactError::MissingEtag(number))?;
+                    parts.push(UploadedPart {
+                        part_number: number,
+                        etag,
+                    });
                 }
                 Ok(parts)
             }
@@ -97,11 +122,24 @@ impl Transfer {
             if attempt > 0 {
                 tokio::time::sleep(Duration::from_millis(500 * 2u64.pow(attempt))).await;
             }
-            match self.http.put(url).header("content-length", body.len()).body(body.clone()).send().await {
+            match self
+                .http
+                .put(url)
+                .header("content-length", body.len())
+                .body(body.clone())
+                .send()
+                .await
+            {
                 Ok(resp) if resp.status().is_success() => {
-                    return Ok(resp.headers().get("etag").and_then(|v| v.to_str().ok()).map(str::to_owned));
+                    return Ok(resp
+                        .headers()
+                        .get("etag")
+                        .and_then(|v| v.to_str().ok())
+                        .map(str::to_owned));
                 }
-                Ok(resp) if resp.status().is_server_error() => last = Some(ArtifactError::Status(resp.status().as_u16())),
+                Ok(resp) if resp.status().is_server_error() => {
+                    last = Some(ArtifactError::Status(resp.status().as_u16()))
+                }
                 Ok(resp) => return Err(ArtifactError::Status(resp.status().as_u16())),
                 Err(e) => last = Some(ArtifactError::Http(e)),
             }
@@ -128,7 +166,10 @@ impl Transfer {
             file.flush().await?;
             let actual = hex::encode(hasher.finalize());
             if !actual.eq_ignore_ascii_case(&artifact.sha256) {
-                return Err(ArtifactError::HashMismatch { expected: artifact.sha256.clone(), actual });
+                return Err(ArtifactError::HashMismatch {
+                    expected: artifact.sha256.clone(),
+                    actual,
+                });
             }
             decompress_sparse(&compressed, dest).await
         }
@@ -141,7 +182,10 @@ impl Transfer {
 /// zstd-compresses `src` into `dst`; returns the SHA-256 and size of `dst`.
 pub async fn compress_file(src: &Path, dst: &Path) -> Result<(String, u64), ArtifactError> {
     let input = BufReader::new(tokio::fs::File::open(src).await?);
-    let mut encoder = async_compression::tokio::bufread::ZstdEncoder::with_quality(input, async_compression::Level::Precise(3));
+    let mut encoder = async_compression::tokio::bufread::ZstdEncoder::with_quality(
+        input,
+        async_compression::Level::Precise(3),
+    );
     let mut out = tokio::fs::File::create(dst).await?;
     let mut hasher = Sha256::new();
     let mut size = 0u64;
@@ -268,7 +312,9 @@ mod tests {
             })
             .collect();
         tokio::fs::write(&src, &data).await.unwrap();
-        let t = Transfer { http: reqwest::Client::builder().no_proxy().build().unwrap() };
+        let t = Transfer {
+            http: reqwest::Client::builder().no_proxy().build().unwrap(),
+        };
         let target = UploadTarget::Multipart {
             part_size: 5 * 1024 * 1024,
             part_urls: (1..=3).map(|n| format!("http://{addr}/part/{n}")).collect(),
@@ -277,17 +323,36 @@ mod tests {
         assert_eq!(up.parts.len(), 2);
         assert_eq!(up.parts[1].etag, "\"etag-2\"");
         assert_eq!(received.lock().unwrap()[0], (1, 5 * 1024 * 1024));
-        assert!(!dir.path().join("mem.zst.upload").exists(), "temporary file removed");
+        assert!(
+            !dir.path().join("mem.zst.upload").exists(),
+            "temporary file removed"
+        );
 
         let dest = dir.path().join("restored");
-        let good = ArtifactRef { url: format!("http://{addr}/blob"), sha256: up.sha256.clone(), size: up.size };
+        let good = ArtifactRef {
+            url: format!("http://{addr}/blob"),
+            sha256: up.sha256.clone(),
+            size: up.size,
+        };
         t.download(&good, &dest).await.unwrap();
         assert_eq!(tokio::fs::read(&dest).await.unwrap(), data);
 
-        let bad = ArtifactRef { sha256: "00".repeat(32), ..good };
-        assert!(matches!(t.download(&bad, &dest).await, Err(ArtifactError::HashMismatch { .. })));
+        let bad = ArtifactRef {
+            sha256: "00".repeat(32),
+            ..good
+        };
+        assert!(matches!(
+            t.download(&bad, &dest).await,
+            Err(ArtifactError::HashMismatch { .. })
+        ));
 
-        let too_few = UploadTarget::Multipart { part_size: 5 * 1024 * 1024, part_urls: vec![format!("http://{addr}/part/1")] };
-        assert!(matches!(t.upload(&src, &too_few).await, Err(ArtifactError::TooManyParts { .. })));
+        let too_few = UploadTarget::Multipart {
+            part_size: 5 * 1024 * 1024,
+            part_urls: vec![format!("http://{addr}/part/1")],
+        };
+        assert!(matches!(
+            t.upload(&src, &too_few).await,
+            Err(ArtifactError::TooManyParts { .. })
+        ));
     }
 }

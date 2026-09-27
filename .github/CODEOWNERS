@@ -1,0 +1,16 @@
+# Two approvals from code owners are required on the isolation boundary
+# (branch protection: "Require review from Code Owners", 2 approvals).
+
+*                                   @weftsh/maintainers
+
+/crates/host-agent/                 @weftsh/security @weftsh/maintainers
+/crates/egress-gateway/             @weftsh/security @weftsh/maintainers
+/crates/netpolicy/                  @weftsh/security @weftsh/maintainers
+/crates/guest-init/                 @weftsh/security @weftsh/maintainers
+/crates/awsauth/                    @weftsh/security @weftsh/maintainers
+/guest/                             @weftsh/security @weftsh/maintainers
+/deploy/                            @weftsh/security @weftsh/maintainers
+/packages/control-plane/src/auth/   @weftsh/security @weftsh/maintainers
+/packages/control-plane/src/edge/   @weftsh/security @weftsh/maintainers
+/packages/license/                  @weftsh/security @weftsh/maintainers
+/.github/workflows/                 @weftsh/security @weftsh/maintainers
