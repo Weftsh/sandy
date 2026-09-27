@@ -19,6 +19,9 @@ WORK="$(mktemp -d)"
 trap 'rm -rf "$WORK"' EXIT
 
 mkdir -p "$WORK/zip" "$WORK/src/packages" "$OUT_DIR"
+# The build runs in another directory; keep a relative OUT_DIR pointing where
+# the caller meant it.
+OUT_DIR="$(cd "$OUT_DIR" && pwd)"
 
 # envd's go.mod replaces packages/shared with ../shared, so both modules are
 # unpacked side by side at the same revision.
