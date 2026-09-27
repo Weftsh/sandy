@@ -472,6 +472,18 @@ describe("control plane with fake Firecracker hosts", () => {
     await call("DELETE", `/sandboxes/${created.sandboxID}`);
   });
 
+  it("records why an SDK template build was refused", async () => {
+    const reserved = (await call("POST", "/v3/templates", { name: "refused-steps", cpuCount: 1, memoryMB: 512 })).body;
+    const refused = await call("POST", `/v2/templates/${reserved.templateID}/builds/${reserved.buildID}`, {
+      fromImage: "img",
+      steps: [{ type: "RUN", args: ["echo hi"] }],
+    });
+    expect(refused.status).toBe(400);
+    const status = (await call("GET", `/templates/${reserved.templateID}/builds/${reserved.buildID}/status`)).body;
+    expect(status.status).toBe("error");
+    expect(JSON.stringify(status)).toMatch(/RUN steps are not supported/);
+  });
+
   it("returns E2B-shaped errors", async () => {
     const res = await call("POST", "/v2/sandboxes", { templateID: "missing" });
     expect(res.status).toBe(404);

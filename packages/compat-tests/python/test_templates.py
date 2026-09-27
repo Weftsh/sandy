@@ -30,10 +30,15 @@ def test_build_from_image_with_env_and_workdir():
 
 
 def test_unsupported_build_steps_fail_with_a_clear_error():
+    name = f"compat-{uuid.uuid4().hex[:8]}"
     template = Template().from_image(IMAGE).run_cmd("echo hi > /etc/motd")
     with pytest.raises((BuildException, TemplateException)) as err:
-        Template.build(template, f"compat-{uuid.uuid4().hex[:8]}")
+        Template.build(template, name)
     assert "RUN" in str(err.value) or "not supported" in str(err.value)
+    # The refused build is recorded with its reason; then clean it up.
+    [record] = [t for t in admin("GET", "/weft/v1/templates") if name in t["names"]]
+    assert record["status"] == "error" and "RUN" in record["error"]
+    admin("DELETE", f"/weft/v1/templates/{record['templateId']}")
 
 
 def test_start_and_ready_commands_and_from_template():

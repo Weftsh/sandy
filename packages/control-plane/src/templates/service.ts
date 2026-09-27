@@ -330,6 +330,20 @@ export class TemplateService {
     return true;
   }
 
+  /**
+   * Marks a reserved build that never started as failed with `reason`, so
+   * the template shows why (for example an unsupported build step) instead
+   * of being swept later as abandoned. No-op for builds that started.
+   */
+  async failReservedBuild(principal: Principal, templateId: string, buildId: string, reason: string): Promise<void> {
+    const template = await this.store.getTemplate(templateId);
+    const build = await this.store.getBuild(buildId);
+    if (!template || !build || build.templateId !== templateId) return;
+    if (template.teamId !== principal.teamId && principal.role !== "admin") return;
+    if (template.latestBuildId !== buildId || build.status !== "building" || build.hostId) return;
+    await this.finish(build, "error", reason);
+  }
+
   private async finish(build: BuildRecord, status: "error", error: string): Promise<void> {
     build.status = status;
     build.error = error;

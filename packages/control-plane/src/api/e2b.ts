@@ -207,28 +207,35 @@ export function registerE2BRoutes(app: FastifyInstance, d: E2BDeps): void {
 
   app.post("/v2/templates/:id/builds/:buildId", async (req: Req, reply) => {
     const p = await auth(req);
-    const b = body(req);
-    const { envVars, workdir } = interpretSteps(b.steps);
-    let image = typeof b.fromImage === "string" ? b.fromImage : undefined;
-    if (!image && typeof b.fromTemplate === "string") {
-      const base = await d.templates.resolve(p.teamId, b.fromTemplate);
-      if (!base) throw notFound(`template '${b.fromTemplate}' not found`);
-      image = base.image;
-      Object.assign(envVars, { ...base.envVars, ...envVars });
+    try {
+      const b = body(req);
+      const { envVars, workdir } = interpretSteps(b.steps);
+      let image = typeof b.fromImage === "string" ? b.fromImage : undefined;
+      if (!image && typeof b.fromTemplate === "string") {
+        const base = await d.templates.resolve(p.teamId, b.fromTemplate);
+        if (!base) throw notFound(`template '${b.fromTemplate}' not found`);
+        image = base.image;
+        Object.assign(envVars, { ...base.envVars, ...envVars });
+      }
+      let registry: { username: string; password: string } | undefined;
+      const reg = b.fromImageRegistry as { type?: string; username?: string; password?: string } | undefined;
+      if (reg?.type === "registry" && reg.username && reg.password) registry = { username: reg.username, password: reg.password };
+      else if (reg && reg.type !== undefined) throw badRequest(`fromImageRegistry type ${reg.type} is not supported; push the image to your stack's ECR repository`);
+      await d.templates.startReservedBuild(p, req.params.id!, req.params.buildId!, {
+        image: image ?? "e2bdev/base",
+        envVars,
+        defaultWorkdir: workdir,
+        startCmd: typeof b.startCmd === "string" ? b.startCmd : undefined,
+        readyCmd: typeof b.readyCmd === "string" ? b.readyCmd : undefined,
+        registry,
+      });
+      reply.code(202);
+    } catch (e) {
+      // Record why the reserved build never started (an unsupported step, an
+      // unknown base template), so the template's status shows it.
+      await d.templates.failReservedBuild(p, req.params.id!, req.params.buildId!, e instanceof Error ? e.message : String(e)).catch(() => {});
+      throw e;
     }
-    let registry: { username: string; password: string } | undefined;
-    const reg = b.fromImageRegistry as { type?: string; username?: string; password?: string } | undefined;
-    if (reg?.type === "registry" && reg.username && reg.password) registry = { username: reg.username, password: reg.password };
-    else if (reg && reg.type !== undefined) throw badRequest(`fromImageRegistry type ${reg.type} is not supported; push the image to your stack's ECR repository`);
-    await d.templates.startReservedBuild(p, req.params.id!, req.params.buildId!, {
-      image: image ?? "e2bdev/base",
-      envVars,
-      defaultWorkdir: workdir,
-      startCmd: typeof b.startCmd === "string" ? b.startCmd : undefined,
-      readyCmd: typeof b.readyCmd === "string" ? b.readyCmd : undefined,
-      registry,
-    });
-    reply.code(202);
   });
 
   // Legacy (v1 SDK/CLI) trigger with no body: nothing to do but acknowledge.
