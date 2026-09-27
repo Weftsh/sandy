@@ -12,9 +12,10 @@ only for the Firecracker runtime.
 
 ```sh
 pnpm install
-sudo scripts/dev-stack.sh up            # builds everything, then starts it
+sudo scripts/dev-stack.sh up            # builds everything (about 5 minutes the first time), then starts it
 source .weft/dev/e2b.env                # E2B_*, WEFT_ADMIN_KEY and test settings
-python3 -c 'from e2b import Sandbox; print(Sandbox.create().commands.run("uname -a").stdout)'
+python3 -m venv .weft/venv && .weft/venv/bin/pip install -q e2b
+.weft/venv/bin/python -c 'from e2b import Sandbox; s = Sandbox.create(); print(s.commands.run("uname -a").stdout); s.kill()'
 sudo scripts/dev-stack.sh down
 ```
 
