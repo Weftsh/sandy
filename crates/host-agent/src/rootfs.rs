@@ -75,7 +75,9 @@ fn has_symlink_ancestor(root: &Path, rel: &Path) -> io::Result<bool> {
 pub fn extract_layer<R: Read>(reader: R, root: &Path) -> Result<(), RootfsError> {
     let mut archive = tar::Archive::new(reader);
     archive.set_preserve_permissions(true);
-    archive.set_preserve_ownerships(true);
+    // Image files keep their owners. That needs root, which the agent always
+    // is; unprivileged runs (unit tests) extract as the current user.
+    archive.set_preserve_ownerships(nix::unistd::geteuid().is_root());
     archive.set_unpack_xattrs(false);
     archive.set_overwrite(true);
     for entry in archive.entries()? {
@@ -359,7 +361,8 @@ fn ensure_user(root: &Path) -> Result<(), RootfsError> {
     }
     fs::create_dir_all(&home)?;
     let meta = fs::metadata(&home)?;
-    if meta.uid() != uid {
+    // Only root can give the directory away (the agent always is root).
+    if meta.uid() != uid && nix::unistd::geteuid().is_root() {
         nix::unistd::chown(&home, Some(uid.into()), Some(gid.into()))
             .map_err(|e| RootfsError::Other(format!("chown home: {e}")))?;
     }
