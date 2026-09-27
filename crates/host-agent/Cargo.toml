@@ -23,7 +23,7 @@ bytes = "1"
 clap = { version = "4", features = ["derive", "env"] }
 flate2 = "1"
 futures-util = "0.3"
-getrandom = "0.3"
+getrandom = "0.4"
 hex = "0.4"
 hickory-proto = { version = "0.26", default-features = false, features = ["std"] }
 http = "1"
