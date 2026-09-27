@@ -55,7 +55,7 @@ Fleet
   sandboxes
 
 Settings come from ${CONFIG_PATH}, overridden by
-WEFT_API_URL / WEFT_API_KEY or --api-url / --key.
+WEFT_API_URL / WEFT_API_KEY / WEFT_DOMAIN or --api-url / --key / --domain.
 `;
 
 function loadConfig(): CliConfig {
@@ -153,7 +153,7 @@ async function main(argv: string[]): Promise<void> {
 
   if (group === "env") {
     if (!apiUrl) fail("no API URL; run `weft-sandbox login` first");
-    const domain = values.domain ?? config.domain ?? new URL(apiUrl).hostname.replace(/^api\./, "");
+    const domain = values.domain ?? process.env.WEFT_DOMAIN ?? config.domain ?? new URL(apiUrl).hostname.replace(/^api\./, "");
     if (!values.key) fail("env needs --key <team-key>");
     for (const [k, v] of Object.entries(e2bEnvironment({ apiUrl, domain, apiKey: values.key }))) {
       process.stdout.write(`export ${k}=${JSON.stringify(v)}\n`);

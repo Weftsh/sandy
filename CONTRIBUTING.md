@@ -27,6 +27,25 @@ owners (see [.github/CODEOWNERS](.github/CODEOWNERS)):
 Automated tools and AI agents may propose changes anywhere, but a person
 reviews and approves every boundary change.
 
+## Repository layout
+
+| Path | What it is | License |
+| --- | --- | --- |
+| `packages/control-plane` | API, edge proxy and worker (TypeScript, Fastify) | FSL-1.1-ALv2 |
+| `packages/license` | License key format, verification and daily check | FSL-1.1-ALv2 |
+| `crates/host-agent` | Host agent: Firecracker runtime, slot networking, DNS, egress forwarder, tunnel | FSL-1.1-ALv2 |
+| `crates/egress-gateway` | Egress policy enforcement and credential proxy | FSL-1.1-ALv2 |
+| `crates/netpolicy` | Egress policy compiler shared by host agent and gateway | FSL-1.1-ALv2 |
+| `crates/guest-init` | PID 1 inside each sandbox | FSL-1.1-ALv2 |
+| `crates/awsauth` | IAM authentication between hosts, gateway and control plane | FSL-1.1-ALv2 |
+| `packages/sdk` | `@weftsh/sandbox`: helpers and the `weft-sandbox` CLI | Apache-2.0 |
+| `packages/compat-tests` | E2B SDK compatibility suite (Python and JS) | Apache-2.0 |
+| `tests/escape` | Escape-attempt suite | Apache-2.0 |
+| `deploy` | CloudFormation stack, Lambda custom resources, host AMI (Packer) | Apache-2.0 |
+| `guest` | Pinned builds of envd and the guest kernel | Apache-2.0 (build scripts) |
+| `templates/base` | The default `base` template image | Apache-2.0 |
+| `docs` | User and operator documentation | Apache-2.0 |
+
 ## Local development
 
 Requirements: Linux, root (for network namespaces and iptables), Rust (the
@@ -34,11 +53,11 @@ version in `rust-toolchain.toml`), Node.js 22 with pnpm, Go (to build envd),
 Python 3.11+, `iproute2`, `iptables` and `openssl`.
 
 ```sh
-pnpm install
-sudo scripts/dev-stack.sh up          # control plane, egress gateway, host agent
-source .weft/dev/e2b.env              # E2B_API_URL, E2B_DOMAIN, E2B_API_KEY, ...
-packages/compat-tests/run.sh          # E2B SDK compatibility suite
-.weft/compat-venv/bin/pytest tests/escape   # escape-attempt suite
+scripts/dev-stack.sh build                                 # as you
+sudo env "PATH=$PATH" scripts/dev-stack.sh up --no-build   # control plane, egress gateway, host agent
+source .weft/dev/e2b.env                                   # E2B_API_URL, E2B_DOMAIN, E2B_API_KEY, ...
+packages/compat-tests/run.sh                               # E2B SDK compatibility suite
+.weft/compat-venv/bin/pytest tests/escape                  # escape-attempt suite
 ```
 
 The development stack uses the namespace runtime, which does **not** isolate

@@ -2,9 +2,14 @@
 # Runs the whole Weft Sandboxes stack on one Linux machine for development
 # and CI: control plane, egress gateway and host agent (namespace runtime).
 #
-#   sudo scripts/dev-stack.sh up [--https] [--no-build]
+#   scripts/dev-stack.sh build                                  # as yourself
+#   sudo env "PATH=$PATH" scripts/dev-stack.sh up --no-build [--https]
 #   sudo scripts/dev-stack.sh down
 #   scripts/dev-stack.sh env          # print the E2B_* variables for SDKs
+#
+# Starting needs root (network namespaces, iptables); building does not, and
+# should run as you so your toolchains are used and nothing in the checkout
+# ends up owned by root. When already root (CI containers), `up` builds too.
 #
 # The namespace runtime does NOT isolate sandboxes from the host. Use it only
 # on machines you are happy to run untrusted code on as root. Production uses
@@ -24,6 +29,17 @@ HTTPS_EDGE_PORT=3443
 ECHO_PORT=18443
 
 log() { printf '\033[1m[dev-stack]\033[0m %s\n' "$*" >&2; }
+
+# Under sudo, hands files the developer uses (the environment file, test
+# certificates, the dev license key) back to the invoking user.
+give_to_user() {
+  [[ -n "${SUDO_UID:-}" ]] || return 0
+  local f
+  for f in "$@"; do
+    [[ -e "$f" ]] && chown "$SUDO_UID:${SUDO_GID:-$SUDO_UID}" "$f"
+  done
+  return 0
+}
 die() { log "error: $*"; exit 1; }
 
 remove_host_rules() {
@@ -58,7 +74,7 @@ stop_all() {
 }
 
 build() {
-  log "building (pass --no-build to skip)"
+  log "building"
   if [[ ! -x "$ROOT/dist/guest/envd" ]]; then
     "$ROOT/guest/envd/build.sh" "$ROOT/dist/guest"
   fi
@@ -99,6 +115,11 @@ up() {
     esac
   done
   [[ $EUID -eq 0 ]] || die "run as root: the namespace runtime creates namespaces and iptables rules"
+  if [[ $do_build -eq 1 && -n "${SUDO_USER:-}" ]]; then
+    die "build as yourself first, then start without building:
+    scripts/dev-stack.sh build
+    sudo env \"PATH=\$PATH\" scripts/dev-stack.sh up --no-build"
+  fi
   command -v ip >/dev/null || die "iproute2 is required"
   command -v iptables >/dev/null || die "iptables is required"
   command -v openssl >/dev/null || die "openssl is required"
@@ -203,6 +224,10 @@ up() {
     echo "export E2B_DOMAIN=$domain"
     echo "export E2B_API_KEY=$key"
     echo "export WEFT_ADMIN_KEY=$WEFT_BOOTSTRAP_ADMIN_KEY"
+    # The weft-sandbox CLI reads these, so it works without a login.
+    echo "export WEFT_API_URL=http://127.0.0.1:$API_PORT"
+    echo "export WEFT_API_KEY=$WEFT_BOOTSTRAP_ADMIN_KEY"
+    echo "export WEFT_DOMAIN=$domain"
     echo "export WEFT_DEV_TEAM_ID=$team_id"
     echo "export WEFT_DEV_ECHO_PORT=$ECHO_PORT"
     echo "export WEFT_DEV_ECHO_CERT=$STATE/echo.pem"
@@ -223,12 +248,16 @@ up() {
     fi
   } > "$STATE/e2b.env"
   chmod 600 "$STATE/e2b.env"
+  give_to_user "$ROOT/.weft" "$STATE" "$STATE/e2b.env" "$STATE/echo.pem" "$STATE/echo.key.pem" \
+    "$STATE/upstream-ca.pem" "$STATE/edge-ca.pem" "$STATE/ca-bundle.pem" \
+    "$STATE/license" "$STATE/license/license-signing.key.pem" "$STATE/license/license-signing.pub.pem"
   log "ready. Load the SDK settings with:  source $STATE/e2b.env"
 }
 
 case "${1:-}" in
+  build) build ;;
   up) shift; up "$@" ;;
   down) stop_all; remove_host_rules; log "stopped" ;;
   env) cat "$STATE/e2b.env" ;;
-  *) echo "usage: $0 up [--https] [--no-build] | down | env" >&2; exit 2 ;;
+  *) echo "usage: $0 build | up [--https] [--no-build] | down | env" >&2; exit 2 ;;
 esac

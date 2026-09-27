@@ -11,13 +11,20 @@ only for the Firecracker runtime.
 ## Local stack
 
 ```sh
-pnpm install
-sudo scripts/dev-stack.sh up            # builds everything (about 5 minutes the first time), then starts it
-source .weft/dev/e2b.env                # E2B_*, WEFT_ADMIN_KEY and test settings
+scripts/dev-stack.sh build                                 # as you; about 5 minutes the first time
+sudo env "PATH=$PATH" scripts/dev-stack.sh up --no-build   # root: namespaces and iptables
+source .weft/dev/e2b.env                                   # E2B_*, the admin CLI settings and test settings
 python3 -m venv .weft/venv && .weft/venv/bin/pip install -q e2b
 .weft/venv/bin/python -c 'from e2b import Sandbox; s = Sandbox.create(); print(s.commands.run("uname -a").stdout); s.kill()'
+node packages/sdk/dist/cli.js teams list                   # the admin CLI, already configured
 sudo scripts/dev-stack.sh down
 ```
+
+Building runs as you, so your own toolchains are used and nothing in the
+checkout ends up owned by root; only starting needs root, and `PATH` is passed
+through so it finds `node`. The files you need afterwards (the environment
+file, test certificates) are handed back to you. When you are already root, as
+in a container, `scripts/dev-stack.sh up` builds and starts in one step.
 
 `up` starts, as local processes:
 
