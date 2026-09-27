@@ -102,6 +102,15 @@ up() {
   export WEFT_API_LISTEN="127.0.0.1:$API_PORT"
   gen_ca "$STATE" egress-ca "Weft Sandboxes development egress CA"
   export WEFT_EGRESS_CA_CERT_FILE="$STATE/egress-ca.pem"
+  # A license signing key the development control plane trusts as kid
+  # "dev-1", so license keys can be issued and installed locally with
+  # `weft-license issue --private-key $STATE/license/license-signing.key.pem`.
+  rm -rf "$STATE/license"
+  node "$ROOT/packages/license/dist/cli.js" keygen --out "$STATE/license" >/dev/null
+  WEFT_DEV_LICENSE_PUBLIC_KEYS="$(python3 -c 'import json,sys; print(json.dumps({"dev-1": open(sys.argv[1]).read()}))' "$STATE/license/license-signing.pub.pem")"
+  export WEFT_DEV_LICENSE_PUBLIC_KEYS
+  # Nothing answers license checks locally; keep them off the network.
+  export WEFT_LICENSE_ENDPOINT="http://127.0.0.1:9/v1/check"
 
   # A local HTTPS upstream (echo.weft.test) the egress and credential-proxy
   # tests reach through the gateway, plus a secret for the gateway to inject.
@@ -187,6 +196,7 @@ up() {
     echo "export WEFT_DEV_UPSTREAM_CA=$STATE/upstream-ca.pem"
     echo "export WEFT_DEV_ECHO_SECRET=$echo_secret"
     echo "export WEFT_DEV_IMAGE=$BASE_IMAGE"
+    echo "export WEFT_DEV_LICENSE_KEY=$STATE/license/license-signing.key.pem"
     if [[ $https -eq 1 ]]; then
       cat /etc/ssl/certs/ca-certificates.crt "$STATE/edge-ca.pem" > "$STATE/ca-bundle.pem"
       echo "export SSL_CERT_FILE=$STATE/ca-bundle.pem"

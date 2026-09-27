@@ -40,6 +40,7 @@ A sandbox escape has to get through all of these.
 | **Network namespace per sandbox** | The guest's tap device lives in a namespace of its own, with IPv6 disabled. Its firewall rejects link-local destinations (including the metadata service at `169.254.169.254`), sends DNS to the host's resolver, forwards only TCP (which the host redirects to its egress forwarder) and drops everything else |
 | **Egress gateway** | Checks every connection and HTTP request against the sandbox's policy. It also checks that the connection comes from the host running that sandbox, so a host cannot claim another host's sandbox |
 | **DNS allowlist** | Names outside the policy get `NXDOMAIN`, so DNS cannot carry data out |
+| **Template builds** | Image layers are unpacked, and envd and the sandbox user installed, by helper processes chrooted into the new root filesystem, so symlinks in an image resolve inside it. Device nodes and FIFOs in layers are dropped; entries that write through symlinks or escape with `..` are refused |
 | **Host** | IMDSv2 only, hop limit 1, instance tags hidden from metadata. No SSH; operators use Session Manager. The host's IAM role has no access to S3, DynamoDB, ECR or Secrets Manager |
 
 The guest kernel is built from a pinned Linux LTS release with a minimal

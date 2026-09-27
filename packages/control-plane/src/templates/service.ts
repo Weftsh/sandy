@@ -27,6 +27,9 @@ export interface ImageBuildOptions {
   readyCmd?: string;
   /** Admin only: make the template usable by every team. */
   public?: boolean;
+  /** The team that owns the template. Admins must set this or `public`;
+   * team keys may only name their own team. */
+  teamId?: string;
   /** Credentials for a private registry other than the stack's ECR. */
   registry?: { username: string; password: string };
 }
@@ -111,10 +114,24 @@ export class TemplateService {
     if (!NAME_RE.test(name)) throw badRequest("template name must be 1-63 lowercase letters, digits, - or _, starting with a letter or digit");
     if (!opts.image || opts.image.length > 512) throw badRequest("image is required");
     if (opts.public && principal.role !== "admin") throw forbidden("only admins can create public templates");
-    const teamId = opts.public ? null : principal.teamId;
+    if (opts.public && opts.teamId) throw badRequest("a template is either public or owned by one team, not both");
+    let teamId: string | null;
+    if (opts.public) {
+      teamId = null;
+    } else if (opts.teamId && opts.teamId !== principal.teamId) {
+      if (principal.role !== "admin") throw forbidden("team keys can only build templates for their own team");
+      if (!(await this.store.getTeam(opts.teamId))) throw notFound(`team ${opts.teamId} not found`);
+      teamId = opts.teamId;
+    } else if (principal.role === "admin") {
+      // The admin pseudo-team runs no sandboxes; a template there would be
+      // invisible to every real team.
+      throw badRequest("choose who can use the template: a team (teamId, CLI --team <team-id>) or every team (public, CLI --public)");
+    } else {
+      teamId = principal.teamId;
+    }
     const existing = existingId
       ? await this.store.getTemplate(existingId)
-      : (await this.store.listTemplatesVisibleTo(principal.teamId)).find((t) => t.teamId === teamId && t.names.includes(name));
+      : (await this.store.listTemplatesVisibleTo(teamId ?? principal.teamId)).find((t) => t.teamId === teamId && t.names.includes(name));
     if (existing && existing.status === "building") throw conflict(`template ${name} is already building`);
     const template = this.nextTemplate(existing, { ...opts, teamId, name });
     return this.dispatch(template, template.latestBuildId, opts);
@@ -171,7 +188,7 @@ export class TemplateService {
 
   private nextTemplate(
     existing: Template | undefined,
-    opts: { teamId: string | null; name: string } & Partial<ImageBuildOptions>,
+    opts: { teamId: string | null; name: string } & Partial<Omit<ImageBuildOptions, "teamId">>,
   ): Template {
     const now = new Date().toISOString();
     const template: Template = {

@@ -38,7 +38,7 @@ the compatibility suite exercises the feature through the SDK.
 
 | Feature | Status | Tested | Notes |
 | --- | --- | --- | --- |
-| `Sandbox.create` with template, timeout, metadata, envs | ✅ | yes | Default template `base`, default timeout 300 s, maximum 24 h |
+| `Sandbox.create` with template, timeout, metadata, envs | ✅ | yes | Default template `base`, default timeout 300 s; longer timeouts are capped at 24 h. Metadata up to 32 KiB and environment variables up to 128 KiB in total |
 | `Sandbox.connect` to a running or paused sandbox | ✅ | yes | Resumes a paused sandbox |
 | `Sandbox.list` with metadata and state filters, pagination | ✅ | yes | |
 | `get_info`, `is_running`, `kill`, `set_timeout` | ✅ | yes | |

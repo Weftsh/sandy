@@ -48,7 +48,10 @@ pub fn router(state: AppState) -> Router {
         .route("/v1/sandboxes/{id}", put(start).delete(stop))
         .route("/v1/sandboxes/{id}/pause", post(pause))
         .route("/v1/sandboxes/{id}/egress", put(egress))
-        .route("/v1/templates/{build_id}", post(build).get(build_status))
+        .route(
+            "/v1/templates/{build_id}",
+            post(build).get(build_status).delete(evict),
+        )
         .layer(axum::middleware::from_fn_with_state(
             state.clone(),
             require_token,
@@ -137,6 +140,17 @@ async fn build_status(
     Path(build_id): Path<String>,
 ) -> Result<Json<BuildStatus>, ManagerError> {
     s.manager.build_status(&build_id).map(Json)
+}
+
+/// Deletes a cached template build no sandbox on this host uses.
+async fn evict(
+    State(s): State<AppState>,
+    Path(build_id): Path<String>,
+) -> Result<StatusCode, ManagerError> {
+    s.manager
+        .evict_template(&build_id)
+        .await
+        .map(|()| StatusCode::NO_CONTENT)
 }
 
 /// Serves an axum router over TLS.

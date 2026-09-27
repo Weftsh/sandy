@@ -3,6 +3,7 @@
 //! ```text
 //! weft-host-agent run [flags]                              the agent
 //! weft-host-agent unpack-layer <root> <layer> <media-type>  internal: chrooted layer extraction
+//! weft-host-agent prepare-rootfs <root> <guest-dir>        internal: chrooted guest setup
 //! weft-host-agent enter-cgroup <procs-file> -- <cmd...>     internal: join a cgroup, then exec
 //! ```
 
@@ -63,6 +64,8 @@ enum Command {
         layer: PathBuf,
         media_type: String,
     },
+    #[command(hide = true)]
+    PrepareRootfs { root: PathBuf, guest_dir: PathBuf },
     #[command(hide = true)]
     EnterCgroup {
         procs_file: String,
@@ -179,6 +182,15 @@ fn main() -> ExitCode {
                 ExitCode::FAILURE
             }
         },
+        Command::PrepareRootfs { root, guest_dir } => {
+            match rootfs::prepare_in_chroot(&root, &guest_dir) {
+                Ok(()) => ExitCode::SUCCESS,
+                Err(e) => {
+                    eprintln!("{e}");
+                    ExitCode::FAILURE
+                }
+            }
+        }
         Command::EnterCgroup {
             procs_file,
             command,
@@ -190,6 +202,7 @@ fn main() -> ExitCode {
         Command::Run(args) => {
             tracing_subscriber::fmt()
                 .json()
+                .flatten_event(true)
                 .with_env_filter(
                     tracing_subscriber::EnvFilter::try_from_default_env()
                         .unwrap_or_else(|_| "info".into()),

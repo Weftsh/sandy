@@ -166,6 +166,22 @@ fields @timestamp, dstHost, dst, reason
 | sort @timestamp desc
 ```
 
-Requests the gateway refuses at the HTTP layer get a `403` response with the
-header `x-weft-egress-reason`, so code in the sandbox can tell a policy denial
-from an upstream error.
+Refused DNS names are logged by the host agent instead, in
+`/weft/<stack>/hosts` (`event` `dns`, with `sandboxId` and `name`), once per
+sandbox and name and at most 50 names per sandbox:
+
+```
+fields @timestamp, sandboxId, name
+| filter event = "dns" and decision = "deny"
+| sort @timestamp desc
+```
+
+### What a denial looks like inside the sandbox
+
+| Attempt | What the code sees |
+| --- | --- |
+| A name outside the policy | DNS lookup fails: `Name or service not known`, `ENOTFOUND`, `Could not resolve host` |
+| Plain HTTP to a disallowed host | `403` with the header `x-weft-egress-reason` (for example `not_allowed`) |
+| TLS to a disallowed host or IP address | The connection closes during the handshake: `unexpected EOF`, `connection reset` |
+| Metadata service, host or other link-local addresses | `Connection refused` |
+| UDP other than DNS, ICMP | No answer (timeouts) |

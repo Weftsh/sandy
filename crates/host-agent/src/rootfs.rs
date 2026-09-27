@@ -5,7 +5,10 @@
 //! `chroot`s into the target directory: absolute symlinks and `..` then
 //! resolve inside the root filesystem, whatever the archive contains. The
 //! extractor additionally refuses entries that would write through a
-//! symlink, and applies OCI whiteouts.
+//! symlink, never creates device nodes or FIFOs, and applies OCI whiteouts.
+//! Installing envd, the init binary and the sandbox user happens in a second
+//! chrooted helper (`weft-host-agent prepare-rootfs`) for the same reason:
+//! an image with `etc -> /etc` must not make the agent edit the host's files.
 
 use std::collections::BTreeMap;
 use std::fs;
@@ -111,6 +114,11 @@ pub fn extract_layer<R: Read>(reader: R, root: &Path) -> Result<(), RootfsError>
 
         let dest = root.join(&rel);
         let kind = entry.header().entry_type();
+        // Device nodes would give later writes (or a sandbox) a path to host
+        // devices; FIFOs would hang readers. Images have no business with either.
+        if kind.is_character_special() || kind.is_block_special() || kind.is_fifo() {
+            continue;
+        }
         // Never write through an existing symlink or into a type mismatch.
         if let Ok(meta) = fs::symlink_metadata(&dest) {
             let keep_dir = meta.is_dir() && kind.is_dir();
@@ -189,9 +197,42 @@ pub fn unpack_layer_in_chroot(
     extract_layer(reader, Path::new("/"))
 }
 
+/// The guest binaries every root filesystem gets.
+pub struct GuestFiles {
+    pub envd: Vec<u8>,
+    pub init: Vec<u8>,
+}
+
+impl GuestFiles {
+    pub fn read(guest_dir: &Path) -> Result<Self, RootfsError> {
+        let read = |name: &str| {
+            fs::read(guest_dir.join(name)).map_err(|e| {
+                RootfsError::Other(format!("reading {}: {e}", guest_dir.join(name).display()))
+            })
+        };
+        Ok(Self {
+            envd: read("envd")?,
+            init: read("weft-guest-init")?,
+        })
+    }
+}
+
+/// Entry point of the `prepare-rootfs` helper: reads the guest binaries,
+/// `chroot`s into `root` and prepares it there, so every path the image
+/// controls (symlinks included) resolves inside the root filesystem. Runs in
+/// a process of its own because the chroot cannot be undone.
+pub fn prepare_in_chroot(root: &Path, guest_dir: &Path) -> Result<(), RootfsError> {
+    let files = GuestFiles::read(guest_dir)?;
+    nix::unistd::chroot(root)
+        .map_err(|e| RootfsError::Other(format!("chroot {}: {e}", root.display())))?;
+    std::env::set_current_dir("/")?;
+    prepare(Path::new("/"), &files)
+}
+
 /// Installs envd, the init binary and the sandbox user into an unpacked
-/// root filesystem.
-pub fn prepare(root: &Path, guest_dir: &Path) -> Result<(), RootfsError> {
+/// root filesystem. Only safe inside the chroot [`prepare_in_chroot`] sets
+/// up: on the host, a symlink in the image would redirect these writes.
+fn prepare(root: &Path, files: &GuestFiles) -> Result<(), RootfsError> {
     let shell = root.join("bin/sh");
     if fs::symlink_metadata(&shell).is_err() {
         return Err(RootfsError::MissingShell("/bin/sh"));
@@ -205,6 +246,7 @@ pub fn prepare(root: &Path, guest_dir: &Path) -> Result<(), RootfsError> {
         "usr/bin",
         "usr/local/bin",
         "etc",
+        "etc/ssl/certs",
         "home",
     ] {
         let p = root.join(dir);
@@ -217,22 +259,45 @@ pub fn prepare(root: &Path, guest_dir: &Path) -> Result<(), RootfsError> {
         fs::create_dir_all(&p)?;
     }
     fs::set_permissions(root.join("tmp"), fs::Permissions::from_mode(0o1777))?;
-    install_file(&guest_dir.join("envd"), &root.join(GUEST_ENVD_PATH), 0o755)?;
-    install_file(
-        &guest_dir.join("weft-guest-init"),
-        &root.join(GUEST_INIT_PATH),
-        0o755,
-    )?;
+    install_file(&files.envd, &root.join(GUEST_ENVD_PATH), 0o755)?;
+    install_file(&files.init, &root.join(GUEST_INIT_PATH), 0o755)?;
     ensure_user(root)?;
+    ensure_ca_bundle(root)?;
     Ok(())
 }
 
-fn install_file(src: &Path, dst: &Path, mode: u32) -> Result<(), RootfsError> {
+/// envd appends the egress CA to this file when a sandbox's policy has
+/// credential rules, and fails if it is missing (slim images often lack the
+/// `ca-certificates` package). An empty bundle is better than no sandbox.
+fn ensure_ca_bundle(root: &Path) -> Result<(), RootfsError> {
+    let bundle = root.join("etc/ssl/certs/ca-certificates.crt");
+    if !regular_or_missing(&bundle)? {
+        fs::write(&bundle, b"")?;
+        fs::set_permissions(&bundle, fs::Permissions::from_mode(0o644))?;
+    }
+    Ok(())
+}
+
+/// True if `path` is a regular file, false if it does not exist; an error for
+/// anything else (a device, FIFO or directory) that a write must not touch.
+fn regular_or_missing(path: &Path) -> Result<bool, RootfsError> {
+    match fs::metadata(path) {
+        Ok(m) if m.is_file() => Ok(true),
+        Ok(_) => Err(RootfsError::Other(format!(
+            "{} is not a regular file",
+            path.display()
+        ))),
+        Err(e) if e.kind() == io::ErrorKind::NotFound => Ok(false),
+        Err(e) => Err(e.into()),
+    }
+}
+
+fn install_file(contents: &[u8], dst: &Path, mode: u32) -> Result<(), RootfsError> {
     if fs::symlink_metadata(dst).is_ok() {
         remove_any(dst)?;
     }
-    fs::copy(src, dst)
-        .map_err(|e| RootfsError::Other(format!("installing {}: {e}", src.display())))?;
+    fs::write(dst, contents)
+        .map_err(|e| RootfsError::Other(format!("installing {}: {e}", dst.display())))?;
     fs::set_permissions(dst, fs::Permissions::from_mode(mode))?;
     Ok(())
 }
@@ -242,6 +307,10 @@ fn install_file(src: &Path, dst: &Path, mode: u32) -> Result<(), RootfsError> {
 fn ensure_user(root: &Path) -> Result<(), RootfsError> {
     let passwd_path = root.join("etc/passwd");
     let group_path = root.join("etc/group");
+    let shadow = root.join("etc/shadow");
+    for f in [&passwd_path, &group_path, &shadow] {
+        regular_or_missing(f)?;
+    }
     let passwd = fs::read_to_string(&passwd_path).unwrap_or_default();
     let group = fs::read_to_string(&group_path).unwrap_or_default();
     let users = parse_ids(&passwd, 2);
@@ -276,7 +345,6 @@ fn ensure_user(root: &Path) -> Result<(), RootfsError> {
         if !groups.contains_key(SANDBOX_USER) {
             append_line(&group_path, &format!("{SANDBOX_USER}:x:{id}:"))?;
         }
-        let shadow = root.join("etc/shadow");
         if shadow.exists() {
             append_line(&shadow, &format!("{SANDBOX_USER}:!:19000:0:99999:7:::"))?;
         }
@@ -284,6 +352,11 @@ fn ensure_user(root: &Path) -> Result<(), RootfsError> {
     };
 
     let home = root.join("home").join(SANDBOX_USER);
+    if fs::symlink_metadata(&home).is_ok_and(|m| m.file_type().is_symlink()) {
+        return Err(RootfsError::Other(format!(
+            "/home/{SANDBOX_USER} must be a directory, not a symlink"
+        )));
+    }
     fs::create_dir_all(&home)?;
     let meta = fs::metadata(&home)?;
     if meta.uid() != uid {
@@ -293,6 +366,7 @@ fn ensure_user(root: &Path) -> Result<(), RootfsError> {
     let sudoers = root.join("etc/sudoers.d");
     if root.join("usr/bin/sudo").exists() && sudoers.is_dir() {
         let f = sudoers.join("weft-sandbox-user");
+        regular_or_missing(&f)?;
         fs::write(&f, format!("{SANDBOX_USER} ALL=(ALL:ALL) NOPASSWD: ALL\n"))?;
         fs::set_permissions(&f, fs::Permissions::from_mode(0o440))?;
     }
@@ -381,6 +455,25 @@ mod tests {
     }
 
     #[test]
+    fn never_creates_device_nodes_or_fifos() {
+        let root = tempfile::tempdir().unwrap();
+        let tar = tar_with(&[
+            ("etc/passwd", tar::EntryType::Block, b"", None),
+            ("dev/mem", tar::EntryType::Char, b"", None),
+            ("tmp/pipe", tar::EntryType::Fifo, b"", None),
+            ("etc/hostname", tar::EntryType::Regular, b"box", None),
+        ]);
+        extract_layer(&tar[..], root.path()).unwrap();
+        for p in ["etc/passwd", "dev/mem", "tmp/pipe"] {
+            assert!(
+                fs::symlink_metadata(root.path().join(p)).is_err(),
+                "{p} was created"
+            );
+        }
+        assert_eq!(fs::read(root.path().join("etc/hostname")).unwrap(), b"box");
+    }
+
+    #[test]
     fn refuses_parent_traversal() {
         let dir = tempfile::tempdir().unwrap();
         let evil = tar_with(&[("../escape", tar::EntryType::Regular, b"x", None)]);
@@ -440,11 +533,12 @@ mod tests {
     #[test]
     fn prepares_user_and_binaries() {
         let root = tempfile::tempdir().unwrap();
-        let guest = tempfile::tempdir().unwrap();
-        fs::write(guest.path().join("envd"), b"envd").unwrap();
-        fs::write(guest.path().join("weft-guest-init"), b"init").unwrap();
+        let guest = GuestFiles {
+            envd: b"envd".to_vec(),
+            init: b"init".to_vec(),
+        };
         assert!(matches!(
-            prepare(root.path(), guest.path()),
+            prepare(root.path(), &guest),
             Err(RootfsError::MissingShell(_))
         ));
 
@@ -457,7 +551,7 @@ mod tests {
         )
         .unwrap();
         fs::write(root.path().join("etc/group"), "root:x:0:\nubuntu:x:1000:\n").unwrap();
-        prepare(root.path(), guest.path()).unwrap();
+        prepare(root.path(), &guest).unwrap();
         let passwd = fs::read_to_string(root.path().join("etc/passwd")).unwrap();
         assert!(
             passwd.contains("user:x:1001:1001::/home/user:/bin/sh"),
@@ -472,7 +566,7 @@ mod tests {
         );
         assert!(root.path().join("home/user").is_dir());
         // Idempotent.
-        prepare(root.path(), guest.path()).unwrap();
+        prepare(root.path(), &guest).unwrap();
         assert_eq!(
             fs::read_to_string(root.path().join("etc/passwd"))
                 .unwrap()

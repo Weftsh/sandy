@@ -18,10 +18,18 @@ templates are public, which means every team can use them.
 
 ## Building a template
 
+### Who can use a template
+
+A template belongs to one team, or is public (every team can use it). With
+the admin key, say which: `--team <team-id>` or `--public`. The CLI refuses
+to guess, because a template built into the admin key's own pseudo-team would
+be invisible to every team. With a team key (for example through the SDK's
+`Template.build`), the template belongs to that team.
+
 ### From an existing image
 
 ```sh
-weft-sandbox templates build --name data-science \
+weft-sandbox templates build --name data-science --team <team-id> \
   --image ghcr.io/example/data-science:1.4 --cpu 2 --memory 2048 --wait
 ```
 
@@ -35,7 +43,7 @@ Pin images by digest (`image@sha256:...`) for reproducible templates.
 ### From a Dockerfile
 
 ```sh
-weft-sandbox templates build --name my-agent \
+weft-sandbox templates build --name my-agent --public \
   --dockerfile ./Dockerfile --context . \
   --repository <EcrRepositoryUri output> --wait
 ```
@@ -76,7 +84,7 @@ list is in [compatibility.md](compatibility.md#templates).
 | Environment | `--env K=V` (repeatable) | `set_envs` | the image's `ENV` | |
 | Start command | `--start-cmd` | `set_start_cmd` | none | |
 | Ready command | `--ready-cmd` | `set_start_cmd` / `set_ready_cmd` | none | |
-| Visible to every team | `--public` | none | no | |
+| Owner (admin key) | `--team <team-id>` or `--public` | the key's team | | |
 
 Template names are 1 to 63 lowercase letters, digits, `-` or `_`.
 
@@ -115,4 +123,9 @@ weft-sandbox templates rebuild <template-id> --wait
 weft-sandbox templates delete <template-id>
 ```
 
+`templates list` shows each template's owner: `public` or a team ID.
+
 Deleting a template does not affect sandboxes that are already running.
+Hosts keep built templates on their data volume for fast starts; the control
+plane has them delete builds that no template or sandbox uses any more
+(deleted templates and superseded builds) every ten minutes.

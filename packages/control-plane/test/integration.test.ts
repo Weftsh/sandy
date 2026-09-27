@@ -104,6 +104,8 @@ async function startFakeHost(hostId: string, runtime: "firecracker" | "namespace
         return json(200, { sandboxId: m[1], state: "running", envdVersion: "0.9.0", startedAt: new Date().toISOString() });
       }
       if (/^\/v1\/sandboxes\/[a-z0-9]+\/egress$/.test(req.url!) && req.method === "PUT") return res.writeHead(204).end();
+      if (/^\/v1\/templates\/[^/]+$/.test(req.url!) && req.method === "POST") return json(202, {});
+      if (/^\/v1\/templates\/[^/]+$/.test(req.url!) && req.method === "DELETE") return res.writeHead(204).end();
       if (m && req.method === "DELETE") {
         host.sandboxes.delete(m[1]!);
         return res.writeHead(204).end();
@@ -187,6 +189,7 @@ describe("control plane with fake Firecracker hosts", () => {
   const hosts: FakeHost[] = [];
   let teamKey = "";
   let adminKey = "";
+  let sandboxService: SandboxService;
 
   beforeAll(async () => {
     envd = await startFakeEnvd();
@@ -197,7 +200,7 @@ describe("control plane with fake Firecracker hosts", () => {
     const templates = new TemplateService(store, hostsRegistry, artifacts as unknown as ArtifactStore, undefined, { vcpus: 2, memoryMib: 512, diskMib: 2048 }, silentLogger);
     const license = new LicenseService(store, { version: "0.1.0", region: "us-east-1", mode: "key", extraPublicKeys: {} }, silentLogger);
     await license.init();
-    const sandboxes = new SandboxService(
+    const sandboxes = (sandboxService = new SandboxService(
       store,
       hostsRegistry,
       templates,
@@ -205,7 +208,7 @@ describe("control plane with fake Firecracker hosts", () => {
       license,
       { domain: DOMAIN, defaultTimeoutSec: 300, maxTimeoutSec: 3600, pausedRetentionDays: 30 },
       silentLogger,
-    );
+    ));
     adminKey = "weft_sk_integration_admin_key_0123456789";
     await keys.ensureAdminKey(adminKey);
     api = buildApi({
@@ -255,14 +258,14 @@ describe("control plane with fake Firecracker hosts", () => {
     return { status: res.status, body: text ? JSON.parse(text) : undefined, headers: res.headers };
   }
 
-  async function heartbeat(h: FakeHost, sandboxes: string[]) {
+  async function heartbeat(h: FakeHost, sandboxes: string[], templates: string[] = []) {
     const res = await fetch(`${base}/internal/v1/hosts/heartbeat`, {
       method: "POST",
       headers: { "content-type": "application/json", "x-weft-internal-auth": `dev-token ${DEV_TOKEN}` },
       body: JSON.stringify({
         hostId: h.hostId, privateIp: "127.0.0.1", apiPort: h.apiPort, tunnelPort: h.tunnelPort, certPem: h.cert, token: h.token,
         version: "test", runtime: h.runtime, capacity: { maxSandboxes: 10, vcpus: 8, memoryMib: 16384 },
-        sandboxes: sandboxes.map((sandboxId) => ({ sandboxId, state: "running" })), templates: [], draining: false,
+        sandboxes: sandboxes.map((sandboxId) => ({ sandboxId, state: "running" })), templates, draining: false,
       }),
     });
     expect(res.status).toBe(200);
@@ -375,6 +378,24 @@ describe("control plane with fake Firecracker hosts", () => {
     expect(host.sandboxes.has("orphan000000000000")).toBe(false);
   });
 
+  it("drops a restarted host's sandboxes at once", async () => {
+    const created = (await call("POST", "/v2/sandboxes", { templateID: "base" })).body;
+    const host = hosts.find((h) => h.sandboxes.has(created.sandboxID))!;
+    // Same process, sandbox missing from the heartbeat: still within its grace.
+    await heartbeat(host, []);
+    await new Promise((r) => setTimeout(r, 200));
+    expect(await store.getSandbox(created.sandboxID)).toBeDefined();
+    // The agent restarted: a new certificate and no sandboxes.
+    const oldCert = host.cert;
+    host.cert = selfSignedCert().cert;
+    await new Promise((r) => setTimeout(r, 5));
+    await heartbeat(host, []);
+    await new Promise((r) => setTimeout(r, 200));
+    expect(await store.getSandbox(created.sandboxID)).toBeUndefined();
+    host.cert = oldCert;
+    await heartbeat(host, []);
+  });
+
   it("rejects heartbeats without valid internal credentials", async () => {
     const res = await fetch(`${base}/internal/v1/hosts/heartbeat`, {
       method: "POST",
@@ -416,6 +437,41 @@ describe("control plane with fake Firecracker hosts", () => {
     for (const id of [wide.sandboxID, narrow.sandboxID]) await call("DELETE", `/sandboxes/${id}`, undefined, key);
   });
 
+  it("makes admins choose which team owns a template", async () => {
+    const x = (await call("POST", "/weft/v1/teams", { name: "owner-x" }, adminKey)).body;
+    const y = (await call("POST", "/weft/v1/teams", { name: "owner-y" }, adminKey)).body;
+    const build = (body: Record<string, unknown>, key = adminKey) => call("POST", "/weft/v1/templates", { image: "img", ...body }, key);
+
+    const unowned = await build({ name: "t-unowned" });
+    expect(unowned.status).toBe(400);
+    expect(unowned.body.message).toMatch(/--team/);
+    expect((await build({ name: "t-missing", teamId: "team_missing" })).status).toBe(404);
+    expect((await build({ name: "t-both", teamId: x.team.teamId, public: true })).status).toBe(400);
+    expect((await build({ name: "t-other", teamId: x.team.teamId }, y.apiKey.key)).status).toBe(403);
+
+    const forX = await build({ name: "t-for-x", teamId: x.team.teamId });
+    expect(forX.status).toBe(202);
+    expect(forX.body).toMatchObject({ teamId: x.team.teamId, public: false });
+    const own = await build({ name: "t-own" }, y.apiKey.key);
+    expect(own.body).toMatchObject({ teamId: y.team.teamId, public: false });
+    const names = async (key: string) => ((await call("GET", "/templates", undefined, key)).body as { names: string[] }[]).flatMap((t) => t.names);
+    expect(await names(x.apiKey.key)).toContain("t-for-x");
+    expect(await names(y.apiKey.key)).not.toContain("t-for-x");
+  });
+
+  it("asks hosts to evict template builds nothing references", async () => {
+    const created = (await call("POST", "/v2/sandboxes", { templateID: "base" })).body;
+    const host = hosts.find((h) => h.sandboxes.has(created.sandboxID))!;
+    const record = (await store.getSandbox(created.sandboxID))!;
+    await store.updateSandbox({ ...record, buildId: "b-old-in-use", version: record.version + 1 });
+    await heartbeat(host, [created.sandboxID], ["b1", "b-old-in-use", "b-deleted"]);
+    host.requests.length = 0;
+    await sandboxService.evictStaleBuilds();
+    const deletes = host.requests.filter((r) => r.method === "DELETE" && r.path.startsWith("/v1/templates/")).map((r) => r.path);
+    expect(deletes).toEqual(["/v1/templates/b-deleted"]);
+    await call("DELETE", `/sandboxes/${created.sandboxID}`);
+  });
+
   it("returns E2B-shaped errors", async () => {
     const res = await call("POST", "/v2/sandboxes", { templateID: "missing" });
     expect(res.status).toBe(404);
@@ -425,6 +481,18 @@ describe("control plane with fake Firecracker hosts", () => {
     expect(((await bad.json()) as { code: number }).code).toBe(400);
     const empty = await fetch(`${base}/sandboxes/abc/pause`, { method: "POST", headers: { "x-api-key": teamKey, "content-type": "application/json" } });
     expect(empty.status).toBe(404);
+  });
+
+  it("rejects oversized or malformed metadata and environment variables", async () => {
+    for (const body of [
+      { envVars: { BIG: "x".repeat(200 * 1024) } },
+      { metadata: Object.fromEntries(Array.from({ length: 40 }, (_, i) => [`k${i}`, "v".repeat(1024)])) },
+      { envVars: { "A=B": "1" } },
+      { envVars: { "": "1" } },
+    ]) {
+      const res = await call("POST", "/v2/sandboxes", { templateID: "base", ...body });
+      expect(res.status).toBe(400);
+    }
   });
 
   it("rejects options it cannot honor instead of ignoring them", async () => {

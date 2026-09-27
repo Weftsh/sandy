@@ -34,6 +34,16 @@ single-URL header routing (`E2B_SANDBOX_URL`). `--no-build` skips the builds.
 `scripts/dev-stack.sh env` prints the environment file. State and logs are in
 `.weft/dev/`, which git ignores.
 
+The development control plane also trusts a throwaway license signing key
+(`kid` `dev-1`), so licensing can be tried end to end:
+
+```sh
+node packages/license/dist/cli.js issue --payload payload.json --private-key "$WEFT_DEV_LICENSE_KEY"
+node packages/sdk/dist/cli.js license install <key>
+```
+
+See [licensing.md](licensing.md#license-keys) for the payload fields.
+
 **The namespace runtime is not an isolation boundary.** Sandboxes are
 processes on your kernel, in their own namespaces, with the production
 network plumbing. Do not run untrusted code in it.

@@ -49,7 +49,7 @@ working:
 
 | You have | Do |
 | --- | --- |
-| An `e2b.Dockerfile` | `weft-sandbox templates build --name my-template --dockerfile e2b.Dockerfile --repository <EcrRepositoryUri output> --cpu 2 --memory 1024 --wait` |
+| An `e2b.Dockerfile` | `weft-sandbox templates build --name my-template --team <team-id> --dockerfile e2b.Dockerfile --repository <EcrRepositoryUri output> --cpu 2 --memory 1024 --wait` |
 | `Template()` code using only `from_image`, `set_envs`, `set_workdir`, `set_start_cmd` | Run it unchanged against your stack |
 | `Template()` code with `run_cmd`, `copy`, `pip_install` and similar | Move those steps into a Dockerfile, then build it as above |
 | The default template | Nothing: `base` exists on every stack |

@@ -28,10 +28,13 @@ export function registerInternalRoutes(app: FastifyInstance, d: InternalDeps): v
   app.post("/internal/v1/hosts/heartbeat", async (req: Req) => {
     const identity = await identify(req);
     const { host, previous } = await d.hosts.heartbeat(identity, req.body);
-    if (!previous || previous.certPem !== host.certPem) {
-      d.log.info("host registered", { hostId: host.hostId, runtime: host.runtime, version: host.version, privateIp: host.privateIp });
+    // A new certificate means a new agent process: whatever it does not
+    // report from before this moment is gone.
+    const restarted = !!previous && previous.certPem !== host.certPem;
+    if (!previous || restarted) {
+      d.log.info("host registered", { hostId: host.hostId, runtime: host.runtime, version: host.version, privateIp: host.privateIp, restarted });
     }
-    void d.sandboxes.reconcileHost(host).catch((e: unknown) => d.log.warn("reconcile failed", { hostId: host.hostId, error: String(e) }));
+    void d.sandboxes.reconcileHost(host, Date.now(), restarted).catch((e: unknown) => d.log.warn("reconcile failed", { hostId: host.hostId, error: String(e) }));
     return { heartbeatIntervalSec: HEARTBEAT_INTERVAL_SEC };
   });
 

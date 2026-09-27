@@ -6,7 +6,7 @@
 import type { FastifyInstance, FastifyRequest } from "fastify";
 
 import { ADMIN_TEAM_ID, type ApiKeys, type Principal } from "../auth/apikeys.js";
-import { badRequest, notFound } from "../errors.js";
+import { badRequest, conflict, notFound } from "../errors.js";
 import { newTeamId } from "../ids.js";
 import { DENY_ALL, validatePolicy } from "../egress.js";
 import type { LicenseService } from "../license/service.js";
@@ -74,6 +74,7 @@ function buildOptions(b: Record<string, unknown>): ImageBuildOptions {
     startCmd: str("startCmd"),
     readyCmd: str("readyCmd"),
     public: b.public === true,
+    teamId: str("teamId"),
     registry:
       registry && typeof registry.username === "string" && typeof registry.password === "string"
         ? { username: registry.username, password: registry.password }
@@ -106,6 +107,8 @@ export function registerAdminRoutes(app: FastifyInstance, d: AdminDeps): void {
     await admin(req);
     const name = obj(req.body).name;
     if (typeof name !== "string" || !name.trim() || name.length > 100) throw badRequest("name is required (up to 100 characters)");
+    const clash = (await d.store.listTeams()).find((t) => t.name.toLowerCase() === name.trim().toLowerCase());
+    if (clash) throw conflict(`a team named ${clash.name} already exists (${clash.teamId})`);
     const team: Team = { teamId: newTeamId(), name: name.trim(), createdAt: new Date().toISOString(), egressPolicy: DENY_ALL };
     await d.store.putTeam(team);
     const { key, record } = await d.keys.create(team.teamId, "team", "initial key");
@@ -129,6 +132,7 @@ export function registerAdminRoutes(app: FastifyInstance, d: AdminDeps): void {
   });
   app.get("/weft/v1/teams/:teamId/api-keys", async (req: Req) => {
     await admin(req);
+    if (req.params.teamId !== ADMIN_TEAM_ID && !(await d.store.getTeam(req.params.teamId!))) throw notFound("team not found");
     return (await d.store.listApiKeys(req.params.teamId!)).map(({ keyHash: _h, ...rest }) => rest);
   });
   app.post("/weft/v1/teams/:teamId/api-keys", async (req: Req, reply) => {
@@ -162,7 +166,12 @@ export function registerAdminRoutes(app: FastifyInstance, d: AdminDeps): void {
   app.post("/weft/v1/templates/:id/rebuild", async (req: Req, reply) => {
     const p = await any(req);
     const existing = await d.templates.get(p, req.params.id!);
-    const opts = buildOptions({ name: existing.names[0], image: existing.image, public: existing.teamId === null, ...obj(req.body) });
+    const opts = buildOptions({
+      name: existing.names[0],
+      image: existing.image,
+      ...(existing.teamId === null ? { public: true } : { teamId: existing.teamId }),
+      ...obj(req.body),
+    });
     const { template } = await d.templates.buildFromImage(p, opts, existing.templateId);
     reply.code(202);
     return templateView(template);

@@ -44,9 +44,9 @@ Teams, keys and egress
 Templates
   templates list
   templates get <template-id>
-  templates build --name <name> --image <image-ref> [options] [--wait]
-  templates build --name <name> --dockerfile <path> --repository <ecr-uri> [--context <dir>] [options] [--wait]
-      options: --cpu <n> --memory <MiB> --disk <MiB> --start-cmd <cmd> --ready-cmd <cmd> --env K=V --public
+  templates build --name <name> --image <image-ref> (--team <team-id> | --public) [options] [--wait]
+  templates build --name <name> --dockerfile <path> --repository <ecr-uri> [--context <dir>] (--team <team-id> | --public) [options] [--wait]
+      options: --cpu <n> --memory <MiB> --disk <MiB> --start-cmd <cmd> --ready-cmd <cmd> --env K=V
   templates rebuild <template-id> [--wait]   same image and settings, new build
   templates delete <template-id>
 
@@ -79,7 +79,8 @@ function print(value: unknown): void {
 }
 
 function templateLine(t: TemplateInfo): string {
-  return `${t.templateId}  ${t.names.join(",").padEnd(20)} ${t.status.padEnd(9)} ${t.public ? "public " : "team   "} ${t.image}`;
+  const owner = t.public ? "public" : (t.teamId ?? "team");
+  return `${t.templateId}  ${t.names.join(",").padEnd(20)} ${t.status.padEnd(9)} ${owner.padEnd(21)} ${t.image}`;
 }
 
 function sh(cmd: string, args: string[], input?: string): string {
@@ -117,6 +118,7 @@ async function main(argv: string[]): Promise<void> {
       dockerfile: { type: "string" },
       context: { type: "string" },
       repository: { type: "string" },
+      team: { type: "string" },
       cpu: { type: "string" },
       memory: { type: "string" },
       disk: { type: "string" },
@@ -198,7 +200,12 @@ async function main(argv: string[]): Promise<void> {
       return print((await admin.teams.get(rest[0])).egressPolicy);
     case "egress set": {
       if (!rest[0] || !rest[1]) fail("egress set needs a team ID and a policy file");
-      const policy = JSON.parse(readFileSync(resolve(rest[1]), "utf8")) as EgressPolicy;
+      let policy: EgressPolicy;
+      try {
+        policy = JSON.parse(readFileSync(resolve(rest[1]), "utf8")) as EgressPolicy;
+      } catch (e) {
+        fail(`cannot read the policy in ${rest[1]}: ${(e as Error).message}`);
+      }
       return print((await admin.teams.setEgressPolicy(rest[0], policy)).egressPolicy);
     }
     case "templates list":
@@ -253,6 +260,7 @@ async function main(argv: string[]): Promise<void> {
         readyCmd: values["ready-cmd"],
         envVars,
         public: values.public,
+        teamId: values.team,
       });
       process.stdout.write(`${templateLine(t)}\n`);
       if (values.wait) {

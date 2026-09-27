@@ -112,6 +112,8 @@ struct Sandbox {
     id: String,
     slot: Slot,
     memory_mib: u32,
+    /// Template build the sandbox started from.
+    build_id: String,
     link: GuestLink,
     started_at: String,
     state: Mutex<SandboxState>,
@@ -289,6 +291,7 @@ impl Manager {
             id: id.to_owned(),
             slot: slot.clone(),
             memory_mib: req.memory_mib,
+            build_id: req.build_id.clone(),
             link: link.clone(),
             started_at: now_rfc3339(),
             state: Mutex::new(SandboxState::Starting),
@@ -691,6 +694,46 @@ impl Manager {
         }
     }
 
+    /// Deletes a cached template build the control plane no longer
+    /// references. Refused while a sandbox on this host runs from it.
+    pub async fn evict_template(&self, build_id: &str) -> Result<()> {
+        validate_id("build", build_id)?;
+        let lock = self
+            .template_locks
+            .lock()
+            .expect("poisoned")
+            .entry(build_id.to_owned())
+            .or_default()
+            .clone();
+        let _held = lock.lock().await;
+        let in_use = self
+            .sandboxes
+            .lock()
+            .expect("poisoned")
+            .values()
+            .any(|s| s.build_id == build_id);
+        if in_use {
+            return Err(ManagerError::Conflict(format!(
+                "template build {build_id} is in use"
+            )));
+        }
+        if self
+            .templates
+            .lock()
+            .expect("poisoned")
+            .remove(build_id)
+            .is_none()
+        {
+            return Err(ManagerError::NotFound(format!(
+                "template build {build_id} is not on this host"
+            )));
+        }
+        let dir = self.cfg.data_dir.join("templates").join(build_id);
+        tokio::fs::remove_dir_all(&dir).await.map_err(internal)?;
+        tracing::info!(build = %build_id, "evicted unused template build");
+        Ok(())
+    }
+
     pub fn cached_templates(&self) -> Vec<String> {
         let mut v: Vec<String> = self
             .templates
@@ -927,8 +970,21 @@ impl Manager {
             }
             let _ = tokio::fs::remove_file(&layer.path).await;
         }
-        rootfs::prepare(&rootfs_dir, &self.cfg.guest_dir)
-            .map_err(|e| ManagerError::BadRequest(e.to_string()))?;
+        // Chrooted like the extraction: the image decides what its paths
+        // resolve to.
+        let out = tokio::process::Command::new(&agent)
+            .arg("prepare-rootfs")
+            .arg(&rootfs_dir)
+            .arg(&self.cfg.guest_dir)
+            .output()
+            .await
+            .map_err(internal)?;
+        if !out.status.success() {
+            return Err(ManagerError::BadRequest(format!(
+                "preparing the root filesystem failed: {}",
+                String::from_utf8_lossy(&out.stderr).trim()
+            )));
+        }
 
         let mut env = rootfs::parse_env(pulled.config.env.as_deref().unwrap_or_default());
         env.extend(req.env_vars.clone());

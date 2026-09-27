@@ -5,8 +5,9 @@
 //! other name gets NXDOMAIN without leaving the host, so a sandbox with no
 //! allowlist cannot resolve anything and cannot tunnel data out through DNS.
 
+use std::collections::{HashMap, HashSet};
 use std::net::{IpAddr, SocketAddr};
-use std::sync::Arc;
+use std::sync::{Arc, Mutex};
 use std::time::Duration;
 
 use hickory_proto::op::{Message, MessageType, ResponseCode};
@@ -17,10 +18,17 @@ use crate::slots::SlotTable;
 
 const UPSTREAM_TIMEOUT: Duration = Duration::from_secs(3);
 const MAX_MESSAGE: usize = 4096;
+/// Distinct refused names logged per sandbox; a sandbox querying random
+/// names must not be able to flood the log.
+const LOGGED_NAMES_PER_SANDBOX: usize = 50;
+/// Sandboxes tracked before the log de-duplication starts over.
+const LOGGED_SANDBOXES: usize = 1024;
 
 pub struct Resolver {
     slots: Arc<SlotTable>,
     upstream: SocketAddr,
+    /// Refused names already logged, per sandbox.
+    logged: Mutex<HashMap<String, HashSet<String>>>,
 }
 
 /// What to do with one query.
@@ -35,7 +43,42 @@ pub enum Verdict {
 
 impl Resolver {
     pub fn new(slots: Arc<SlotTable>, upstream: SocketAddr) -> Self {
-        Self { slots, upstream }
+        Self {
+            slots,
+            upstream,
+            logged: Mutex::default(),
+        }
+    }
+
+    /// Writes an audit line for a refused name, once per sandbox and name.
+    fn log_denial(&self, sandbox_id: &str, name: &str) {
+        let mut logged = self.logged.lock().expect("poisoned");
+        if logged.len() >= LOGGED_SANDBOXES && !logged.contains_key(sandbox_id) {
+            logged.clear();
+        }
+        let names = logged.entry(sandbox_id.to_owned()).or_default();
+        if names.len() > LOGGED_NAMES_PER_SANDBOX || names.contains(name) {
+            return;
+        }
+        names.insert(name.to_owned());
+        if names.len() > LOGGED_NAMES_PER_SANDBOX {
+            tracing::info!(
+                target: "audit",
+                event = "dns",
+                sandboxId = sandbox_id,
+                "further refused DNS names from this sandbox are not logged"
+            );
+            return;
+        }
+        tracing::info!(
+            target: "audit",
+            event = "dns",
+            sandboxId = sandbox_id,
+            name,
+            decision = "deny",
+            reason = "not_allowed",
+            "egress dns"
+        );
     }
 
     /// Decides how to handle `query` from `source`.
@@ -62,7 +105,12 @@ impl Resolver {
         if allowed {
             Verdict::Forward
         } else {
-            tracing::debug!(sandbox = %entry.sandbox_id, name = ?msg.queries.first().map(|q| q.name().to_ascii()), "dns denied");
+            let name = msg
+                .queries
+                .first()
+                .map(|q| q.name().to_ascii())
+                .unwrap_or_default();
+            self.log_denial(&entry.sandbox_id, name.trim_end_matches('.'));
             Verdict::Answer(reply(&msg, ResponseCode::NXDomain))
         }
     }
@@ -267,6 +315,19 @@ mod tests {
             r.decide(IpAddr::V4(slot.ns_ip), b"\x00\x01garbage"),
             Verdict::Drop
         );
+    }
+
+    #[test]
+    fn logs_refused_names_once_and_caps_them_per_sandbox() {
+        let (r, _slot) = setup();
+        for i in 0..200 {
+            r.log_denial("sb", &format!("n{i}.example"));
+            r.log_denial("sb", &format!("n{i}.example"));
+        }
+        r.log_denial("other", "n1.example");
+        let logged = r.logged.lock().unwrap();
+        assert_eq!(logged["sb"].len(), LOGGED_NAMES_PER_SANDBOX + 1);
+        assert_eq!(logged["other"].len(), 1);
     }
 
     #[test]

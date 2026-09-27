@@ -152,9 +152,16 @@ export function startWorker(app: App): () => void {
   every(30_000, "sweep-dead-hosts", () => app.sandboxes.sweepDeadHosts());
   every(10_000, "bootstrap-templates", () => app.templates.ensureBootstrapTemplates(app.config.bootstrapTemplates, admin));
   every(60_000, "resume-builds", () => app.templates.resumeFollowing());
+  every(600_000, "evict-builds", () => app.sandboxes.evictStaleBuilds());
   // Daily license check, spread over the day by a random offset.
   const offset = Math.floor(Math.random() * 3_600_000);
   timers.push(setTimeout(() => every(86_400_000, "license-check", () => app.license.runCheck()), offset));
+  // License usage (peak concurrency) is tracked whether or not metrics are
+  // published.
+  every(60_000, "usage", async () => {
+    const running = (await app.store.listAllSandboxes()).filter((s) => s.state === "running").length;
+    await app.license.recordConcurrency(running);
+  });
   if (app.config.metricsNamespace) {
     const cw = new CloudWatchClient({ region: app.config.region });
     every(60_000, "metrics", async () => {
@@ -164,7 +171,6 @@ export function startWorker(app: App): () => void {
       const capacity = hosts.reduce((n, h) => n + h.capacity.maxSandboxes, 0);
       const used = hosts.reduce((n, h) => n + hostUtilization(h) * h.capacity.maxSandboxes, 0);
       const running = (await app.store.listAllSandboxes()).filter((s) => s.state === "running").length;
-      await app.license.recordConcurrency(running);
       await cw.send(
         new PutMetricDataCommand({
           Namespace: app.config.metricsNamespace,

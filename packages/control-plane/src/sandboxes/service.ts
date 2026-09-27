@@ -66,12 +66,22 @@ export interface ListedSandbox {
   metadata: Record<string, string>;
 }
 
-const stringMap = (raw: unknown, field: string): Record<string, string> => {
+/**
+ * Size limits keep a sandbox record well inside DynamoDB's 400 KB item limit,
+ * so oversized input is a 400 here instead of a storage error later.
+ */
+export const MAP_LIMITS = { metadata: 32 * 1024, envVars: 128 * 1024 } as const;
+
+const stringMap = (raw: unknown, field: keyof typeof MAP_LIMITS): Record<string, string> => {
   if (raw === undefined || raw === null) return {};
   if (typeof raw !== "object" || Array.isArray(raw)) throw badRequest(`${field} must be an object of strings`);
   const out: Record<string, string> = {};
+  let bytes = 0;
   for (const [k, v] of Object.entries(raw)) {
     if (typeof v !== "string") throw badRequest(`${field}.${k} must be a string`);
+    if (!k || /[=\0]/.test(k) || (field === "envVars" && /\s/.test(k))) throw badRequest(`${field} has an invalid name ${JSON.stringify(k)}`);
+    bytes += Buffer.byteLength(k) + Buffer.byteLength(v);
+    if (bytes > MAP_LIMITS[field]) throw badRequest(`${field} is larger than ${MAP_LIMITS[field] / 1024} KiB`);
     out[k] = v;
   }
   return out;
@@ -567,6 +577,37 @@ export class SandboxService {
     }
   }
 
+  /**
+   * Asks hosts to delete cached template builds that no template or sandbox
+   * references any more (deleted templates, superseded builds), so hosts'
+   * data volumes do not fill up. Hosts are read before templates: a build a
+   * host reports was dispatched earlier, so its template already names it.
+   */
+  async evictStaleBuilds(): Promise<void> {
+    const hosts = await this.hosts.liveHosts();
+    if (hosts.length === 0) return;
+    const live = new Set<string>();
+    for (const t of await this.store.listAllTemplates()) {
+      if (t.buildId) live.add(t.buildId);
+      if (t.latestBuildId) live.add(t.latestBuildId);
+    }
+    for (const s of await this.store.listAllSandboxes()) live.add(s.buildId);
+    for (const host of hosts) {
+      const client = this.hosts.client(host);
+      for (const buildId of host.templates.filter((b) => !live.has(b))) {
+        try {
+          await client.request("DELETE", `/v1/templates/${encodeURIComponent(buildId)}`);
+          this.log.info("evicted unused template build", { hostId: host.hostId, buildId });
+        } catch (e) {
+          // 409: a sandbox still runs from it; 404: already gone.
+          if (!(e instanceof HostError && (e.status === 409 || e.status === 404))) {
+            this.log.warn("evicting a template build failed", { hostId: host.hostId, buildId, error: String(e) });
+          }
+        }
+      }
+    }
+  }
+
   // ---- background ----------------------------------------------------------
 
   /** Kills or pauses expired sandboxes and cleans up stale records. */
@@ -595,13 +636,21 @@ export class SandboxService {
    * runs are gone (host restart, crash), and sandboxes the host runs without
    * a record are orphans to stop.
    */
-  async reconcileHost(host: Host, now = Date.now()): Promise<void> {
+  /**
+   * Drops records of sandboxes a host no longer runs and stops sandboxes it
+   * runs without a record. Normally a sandbox gets a minute of grace (the
+   * heartbeat may predate it); right after the host agent restarted
+   * (`restarted`), sandboxes started before the restart are dropped at once.
+   */
+  async reconcileHost(host: Host, now = Date.now(), restarted = false): Promise<void> {
     const reported = new Map(host.sandboxes.map((x) => [x.sandboxId, x.state]));
     const records = (await this.store.listAllSandboxes()).filter((s) => s.hostId === host.hostId || s.snapshot?.hostId === host.hostId);
+    const registeredAt = Date.parse(host.registeredAt);
     for (const s of records) {
       const settled = s.state === "running" || (s.state === "paused" && s.snapshot?.kind === "local");
       const graceOver = now - Date.parse(s.startedAt) > 60_000 && (!s.pausedAt || now - Date.parse(s.pausedAt) > 60_000);
-      if (settled && graceOver && !reported.has(s.sandboxId)) {
+      const predatesRestart = restarted && Date.parse(s.startedAt) < registeredAt && (!s.pausedAt || Date.parse(s.pausedAt) < registeredAt);
+      if (settled && (graceOver || predatesRestart) && !reported.has(s.sandboxId)) {
         this.log.warn("sandbox lost by its host", { sandboxId: s.sandboxId, hostId: host.hostId });
         await this.store.deleteSandbox(s.sandboxId);
       }

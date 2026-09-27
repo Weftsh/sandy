@@ -79,6 +79,8 @@ export interface TemplateBuildOptions {
   startCmd?: string;
   /** Polled until it exits 0 before the snapshot is taken. */
   readyCmd?: string;
+  /** Team that owns the template. With an admin key, set this or `public`. */
+  teamId?: string;
   /** Admin only: usable by every team. */
   public?: boolean;
   /** Credentials for a private registry other than the stack's ECR. */

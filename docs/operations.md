@@ -90,6 +90,7 @@ Security fixes for Firecracker, KVM or the guest kernel ship as new AMIs; see
 | What | Rotate by |
 | --- | --- |
 | Team API keys | `weft-sandbox keys create <team-id>`, move clients, then `weft-sandbox keys revoke <team-id> <key-id>`. Revocation takes effect within seconds |
+| Named admin keys | `weft-sandbox keys create team_admin --name <who>` creates an additional admin key; revoke it like a team key. Prefer these over sharing the bootstrap key |
 | Bootstrap admin key | Put a new random value (at least 32 characters) in the `AdminKeySecretArn` secret, then force a new deployment of the api and worker ECS services. The previous bootstrap key stops working when the new tasks start |
 | Credentials for the credential proxy | Update the secret's value. The gateway reads it again within five minutes; set a new version and wait before revoking the old credential upstream |
 | Egress CA | Not rotated in place in this release. It is created with the stack and valid for 10 years; its private key never leaves Secrets Manager |
@@ -108,7 +109,9 @@ Security fixes for Firecracker, KVM or the guest kernel ship as new AMIs; see
 | --- | --- |
 | `Sandbox.create` returns 503 | `weft-sandbox hosts`: are hosts registered and not full? Auto Scaling activity for launch failures (capacity, quotas) |
 | `Sandbox.create` says a template is still building or failed | `weft-sandbox templates get <id>` shows the build log |
-| Code in a sandbox cannot reach a host | The team's policy (`weft-sandbox egress get`), then the audit log for that sandbox: `reason` says why |
+| Code in a sandbox cannot resolve a name (`Name or service not known`) | The name is not in the team's policy (`weft-sandbox egress get`); the host log has an `event: dns` line for it |
+| Code in a sandbox cannot reach a host | The team's policy, then the gateway audit log for that sandbox: `reason` says why ([egress.md](egress.md#what-a-denial-looks-like-inside-the-sandbox)) |
+| A host agent restarted | Its running sandboxes are gone and disappear from the API at the host's next heartbeat; paused sandboxes are not affected |
 | TLS errors inside the sandbox for a credential host | The client must trust the system store or `SSL_CERT_FILE`; see [egress.md](egress.md#credential-rules) |
 | Hosts do not register | `/weft/<stack>/hosts/<instance-id>/bootstrap`; the host needs to reach `api.<domain>` through the internal load balancer |
 | Clients cannot resolve the domain | The domain resolves only inside the VPC; see [install.md](install.md#reach-the-stack) |
