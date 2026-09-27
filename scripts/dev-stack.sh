@@ -1,9 +1,9 @@
 #!/usr/bin/env bash
 # Runs the whole Weft Sandboxes stack on one Linux machine for development
-# and CI: control plane, egress gateway and host agent (namespace runtime).
+# and CI: control plane, egress gateway and host agent.
 #
-#   scripts/dev-stack.sh build                                  # as yourself
-#   sudo env "PATH=$PATH" scripts/dev-stack.sh up --no-build [--https]
+#   scripts/dev-stack.sh build [--firecracker]                  # as yourself
+#   sudo env "PATH=$PATH" scripts/dev-stack.sh up --no-build [--https] [--firecracker]
 #   sudo scripts/dev-stack.sh down
 #   scripts/dev-stack.sh env          # print the E2B_* variables for SDKs
 #
@@ -11,9 +11,16 @@
 # should run as you so your toolchains are used and nothing in the checkout
 # ends up owned by root. When already root (CI containers), `up` builds too.
 #
-# The namespace runtime does NOT isolate sandboxes from the host. Use it only
-# on machines you are happy to run untrusted code on as root. Production uses
-# Firecracker microVMs (see deploy/).
+# By default sandboxes use the namespace runtime, which does NOT isolate them
+# from the host. Use it only on machines you are happy to run untrusted code
+# on as root.
+#
+# --firecracker runs each sandbox as a Firecracker microVM through the jailer,
+# as production hosts do. It needs /dev/kvm and cgroup v2. `build
+# --firecracker` also builds the guest kernel (about 20 minutes, once) and
+# downloads the Firecracker release pinned for host AMIs into
+# .weft/firecracker. VM data and jails live in $WEFT_DEV_FC_DIR (default
+# /var/lib/weft-dev), which keeps jail socket paths short.
 #
 # --https serves the edge proxy over TLS on https://<port>-<id>.127-0-0-1.sslip.io:3443
 # (a public wildcard name for 127.0.0.1) with a throwaway CA, so the SDKs use
@@ -27,6 +34,8 @@ API_PORT=3000
 EDGE_PORT=3001
 HTTPS_EDGE_PORT=3443
 ECHO_PORT=18443
+FC_BIN_DIR="$ROOT/.weft/firecracker"
+FC_DIR="${WEFT_DEV_FC_DIR:-/var/lib/weft-dev}"
 
 log() { printf '\033[1m[dev-stack]\033[0m %s\n' "$*" >&2; }
 
@@ -56,6 +65,23 @@ remove_host_rules() {
   return 0
 }
 
+# Kills microVMs a stopped host agent left running (processes whose root is
+# a jail), then removes their cgroups and jails.
+remove_firecracker_leftovers() {
+  [[ -d "$FC_DIR/jail" ]] || return 0
+  local p root cg
+  for p in /proc/[0-9]*; do
+    root="$(readlink "$p/root" 2>/dev/null)" || continue
+    if [[ "$root" == "$FC_DIR/jail/"* ]]; then kill -9 "${p#/proc/}" 2>/dev/null || true; fi
+  done
+  sleep 0.5
+  for cg in /sys/fs/cgroup/firecracker/*/; do
+    [[ -d "$cg" ]] && rmdir "$cg" 2>/dev/null
+  done
+  rm -rf "$FC_DIR/jail"
+  return 0
+}
+
 stop_all() {
   # The host agent first, so it can stop its sandboxes while the control
   # plane is still up; wait for each process to exit before going on.
@@ -73,7 +99,43 @@ stop_all() {
   done
 }
 
+pinned() { # name: a value from the host AMI's Firecracker pins
+  sed -n "s/^$1 *= *\"\(.*\)\"$/\1/p" "$ROOT/deploy/packer/firecracker.auto.pkrvars.hcl"
+}
+
+# Downloads the Firecracker and jailer release that host AMIs install,
+# checked against the same pinned hashes (deploy/packer/scripts/20-firecracker.sh).
+fetch_firecracker() {
+  local version archive work rel
+  version="$(pinned firecracker_version)"
+  if [[ -x "$FC_BIN_DIR/firecracker" && -x "$FC_BIN_DIR/jailer" ]] &&
+    [[ "$("$FC_BIN_DIR/firecracker" --version 2>/dev/null | head -n 1)" == "Firecracker v$version" ]]; then
+    return 0
+  fi
+  log "downloading Firecracker v$version"
+  archive="firecracker-v${version}-x86_64.tgz"
+  work="$(mktemp -d)"
+  curl --proto '=https' --tlsv1.2 -fsSL --retry 5 --retry-delay 3 -o "$work/$archive" \
+    "https://github.com/firecracker-microvm/firecracker/releases/download/v${version}/${archive}"
+  echo "$(pinned firecracker_tgz_sha256)  $work/$archive" | sha256sum --quiet -c -
+  tar -xzf "$work/$archive" -C "$work" --no-same-owner
+  rel="$work/release-v${version}-x86_64"
+  echo "$(pinned firecracker_sha256)  $rel/firecracker-v${version}-x86_64" | sha256sum --quiet -c -
+  echo "$(pinned jailer_sha256)  $rel/jailer-v${version}-x86_64" | sha256sum --quiet -c -
+  mkdir -p "$FC_BIN_DIR"
+  install -m 0755 "$rel/firecracker-v${version}-x86_64" "$FC_BIN_DIR/firecracker"
+  install -m 0755 "$rel/jailer-v${version}-x86_64" "$FC_BIN_DIR/jailer"
+  rm -rf "$work"
+}
+
 build() {
+  local firecracker=0 arg
+  for arg in "$@"; do
+    case "$arg" in
+      --firecracker) firecracker=1 ;;
+      *) die "unknown flag $arg" ;;
+    esac
+  done
   log "building"
   if [[ ! -x "$ROOT/dist/guest/envd" ]]; then
     "$ROOT/guest/envd/build.sh" "$ROOT/dist/guest"
@@ -83,6 +145,11 @@ build() {
   cp "$ROOT/target/x86_64-unknown-linux-musl/release/weft-guest-init" "$ROOT/dist/guest/"
   (cd "$ROOT" && cargo build --release -p weft-host-agent -p weft-egress-gateway)
   (cd "$ROOT" && pnpm install --frozen-lockfile && pnpm -r build)
+  if [[ $firecracker -eq 1 ]]; then
+    # Delete dist/guest/vmlinux to rebuild after changing guest/kernel/.
+    [[ -f "$ROOT/dist/guest/vmlinux" ]] || "$ROOT/guest/kernel/build.sh" "$ROOT/dist/guest"
+    fetch_firecracker
+  fi
 }
 
 gen_ca() { # dir name cn
@@ -106,19 +173,20 @@ api() { # method path [body]
 }
 
 up() {
-  local https=0 do_build=1
+  local https=0 do_build=1 firecracker=0 build_flags=()
   for arg in "$@"; do
     case "$arg" in
       --https) https=1 ;;
       --no-build) do_build=0 ;;
+      --firecracker) firecracker=1 build_flags=(--firecracker) ;;
       *) die "unknown flag $arg" ;;
     esac
   done
-  [[ $EUID -eq 0 ]] || die "run as root: the namespace runtime creates namespaces and iptables rules"
+  [[ $EUID -eq 0 ]] || die "run as root: the host agent creates namespaces and iptables rules"
   if [[ $do_build -eq 1 && -n "${SUDO_USER:-}" ]]; then
     die "build as yourself first, then start without building:
-    scripts/dev-stack.sh build
-    sudo env \"PATH=\$PATH\" scripts/dev-stack.sh up --no-build"
+    scripts/dev-stack.sh build ${build_flags[*]}
+    sudo env \"PATH=\$PATH\" scripts/dev-stack.sh up --no-build ${build_flags[*]}"
   fi
   command -v ip >/dev/null || die "iproute2 is required"
   command -v iptables >/dev/null || die "iptables is required"
@@ -126,7 +194,17 @@ up() {
 
   mkdir -p "$STATE" && chmod 700 "$STATE"
   stop_all
-  [[ $do_build -eq 1 ]] && build
+  remove_firecracker_leftovers
+  [[ $do_build -eq 1 ]] && build "${build_flags[@]}"
+  if [[ $firecracker -eq 1 ]]; then
+    [[ -c /dev/kvm ]] || die "--firecracker needs /dev/kvm"
+    [[ -f /sys/fs/cgroup/cgroup.controllers ]] || die "--firecracker needs cgroup v2"
+    command -v mkfs.ext4 >/dev/null || die "--firecracker needs mkfs.ext4 (e2fsprogs)"
+    [[ -x "$FC_BIN_DIR/firecracker" && -x "$FC_BIN_DIR/jailer" ]] ||
+      die "Firecracker is missing; run: scripts/dev-stack.sh build --firecracker"
+    [[ -f "$ROOT/dist/guest/vmlinux" ]] ||
+      die "the guest kernel is missing; run: scripts/dev-stack.sh build --firecracker"
+  fi
 
   # Throwaway development secrets, regenerated on every start.
   export WEFT_DEV_MODE=1
@@ -192,13 +270,24 @@ up() {
     </dev/null >"$STATE/egress-gateway.log" 2>&1) &
   echo $! >"$STATE/egress-gateway.pid"
 
-  log "starting host agent (namespace runtime: NOT isolated)"
-  mkdir -p "$STATE/host"
+  local data_dir runtime_args
+  if [[ $firecracker -eq 1 ]]; then
+    log "starting host agent (Firecracker microVMs)"
+    data_dir="$FC_DIR/host"
+    mkdir -p "$FC_DIR/jail"
+    runtime_args=(--runtime firecracker --kernel "$ROOT/dist/guest/vmlinux" --chroot-base "$FC_DIR/jail"
+      --firecracker-bin "$FC_BIN_DIR/firecracker" --jailer-bin "$FC_BIN_DIR/jailer")
+  else
+    log "starting host agent (namespace runtime: NOT isolated)"
+    data_dir="$STATE/host"
+    runtime_args=(--runtime namespace --insecure-namespace-runtime)
+  fi
+  mkdir -p "$data_dir"
   (cd "$ROOT" && exec nohup ./target/release/weft-host-agent run \
     --host-id dev-host-1 --private-ip 127.0.0.1 \
     --control-plane-url "http://127.0.0.1:$API_PORT" --auth dev-token --dev-token "$WEFT_DEV_TOKEN" \
-    --runtime namespace --insecure-namespace-runtime \
-    --data-dir "$STATE/host" --guest-dir "$ROOT/dist/guest" \
+    "${runtime_args[@]}" \
+    --data-dir "$data_dir" --guest-dir "$ROOT/dist/guest" \
     --egress-gateway 127.0.0.1:15000 --api-listen 127.0.0.1:5007 --tunnel-listen 127.0.0.1:5008 \
     --max-sandboxes "${WEFT_DEV_MAX_SANDBOXES:-32}" \
     </dev/null >"$STATE/host-agent.log" 2>&1) &
@@ -236,6 +325,8 @@ up() {
     echo "export WEFT_DEV_ECHO_SECRET=$echo_secret"
     echo "export WEFT_DEV_IMAGE=$BASE_IMAGE"
     echo "export WEFT_DEV_LICENSE_KEY=$STATE/license/license-signing.key.pem"
+    # The escape suite adds its microVM boundary checks.
+    [[ $firecracker -eq 1 ]] && echo "export WEFT_ESCAPE_RUNTIME=firecracker"
     if [[ $https -eq 1 ]]; then
       cat /etc/ssl/certs/ca-certificates.crt "$STATE/edge-ca.pem" > "$STATE/ca-bundle.pem"
       echo "export SSL_CERT_FILE=$STATE/ca-bundle.pem"
@@ -255,9 +346,9 @@ up() {
 }
 
 case "${1:-}" in
-  build) build ;;
+  build) shift; build "$@" ;;
   up) shift; up "$@" ;;
-  down) stop_all; remove_host_rules; log "stopped" ;;
+  down) stop_all; remove_firecracker_leftovers; remove_host_rules; log "stopped" ;;
   env) cat "$STATE/e2b.env" ;;
-  *) echo "usage: $0 build | up [--https] [--no-build] | down | env" >&2; exit 2 ;;
+  *) echo "usage: $0 build [--firecracker] | up [--https] [--no-build] [--firecracker] | down | env" >&2; exit 2 ;;
 esac

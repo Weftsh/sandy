@@ -58,20 +58,22 @@ network plumbing. Do not run untrusted code in it.
 
 ### Firecracker locally
 
-On a Linux machine with `/dev/kvm`:
+On a Linux machine with `/dev/kvm` and cgroup v2, the same stack runs every
+sandbox as a Firecracker microVM through the jailer, as production hosts do:
 
 ```sh
-guest/kernel/build.sh                   # dist/guest/vmlinux (about 20 minutes)
-guest/envd/build.sh                     # dist/guest/envd
-cargo build --release -p weft-guest-init --target x86_64-unknown-linux-musl
-cp target/x86_64-unknown-linux-musl/release/weft-guest-init dist/guest/
-cargo build --release -p weft-host-agent
+scripts/dev-stack.sh build --firecracker                                 # also builds the guest kernel (about 20 minutes, once)
+sudo env "PATH=$PATH" scripts/dev-stack.sh up --no-build --firecracker
 ```
 
-Install Firecracker and the jailer from the release pinned in
-[guest/kernel/VERSION](../guest/kernel/VERSION), then run the host agent with
-`--runtime firecracker` and `--kernel`, `--firecracker-bin`, `--jailer-bin`
-and `--chroot-base` pointing at them. See `weft-host-agent run --help`.
+`build --firecracker` builds the guest kernel into `dist/guest/vmlinux`
+(delete it to rebuild after changing `guest/kernel/`) and downloads the
+Firecracker and jailer release that host AMIs install, checked against the
+hashes pinned in `deploy/packer/firecracker.auto.pkrvars.hcl`. VM data and
+jails live in `/var/lib/weft-dev` (`WEFT_DEV_FC_DIR`). The environment file
+sets `WEFT_ESCAPE_RUNTIME=firecracker`, so the escape suite adds its microVM
+boundary checks. CI runs this on every change
+([.github/workflows/firecracker.yml](../.github/workflows/firecracker.yml)).
 
 ## Tests
 
