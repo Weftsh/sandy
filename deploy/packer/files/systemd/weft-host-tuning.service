@@ -1,0 +1,13 @@
+[Unit]
+Description=Weft host kernel settings (Firecracker production host setup)
+Documentation=https://github.com/firecracker-microvm/firecracker/blob/main/docs/prod-host-setup.md
+After=systemd-modules-load.service systemd-sysctl.service systemd-udevd.service
+Before=weft-host-agent.service
+
+[Service]
+Type=oneshot
+RemainAfterExit=yes
+ExecStart=/usr/local/sbin/weft-host-tuning
+
+[Install]
+WantedBy=multi-user.target

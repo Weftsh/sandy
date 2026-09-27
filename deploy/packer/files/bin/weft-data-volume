@@ -1,0 +1,78 @@
+#!/usr/bin/env bash
+# Prepares /var/lib/weft: XFS with reflink, so template root filesystems and
+# snapshots are cloned copy-on-write instead of copied. Uses the instance's
+# local NVMe instance store when it has any (striped when there are several),
+# otherwise the EBS data volume the launch template attaches as /dev/sdf.
+#
+# Formats only a device with no filesystem on it. Instance store is empty
+# after every stop/start, so it is formatted again then; the EBS volume is
+# formatted once and mounted as it is on reboots.
+set -euo pipefail
+export LC_ALL=C
+
+MNT=/var/lib/weft
+LABEL=weft-data
+RAID=/dev/md/weft-data
+
+log() { printf 'weft-data-volume: %s\n' "$*"; }
+
+if mountpoint -q "$MNT"; then
+  log "$MNT is already mounted"
+  exit 0
+fi
+
+instance_store=()
+for dev in /dev/nvme*n1; do
+  [[ -b "$dev" ]] || continue
+  model="$(sed -e 's/[[:space:]]*$//' "/sys/block/$(basename "$dev")/device/model" 2>/dev/null || true)"
+  if [[ "$model" == "Amazon EC2 NVMe Instance Storage" ]]; then
+    instance_store+=("$dev")
+  fi
+done
+
+if ((${#instance_store[@]} > 1)); then
+  [[ -e "$RAID" ]] || mdadm --assemble --scan >/dev/null 2>&1 || true
+  if [[ ! -e "$RAID" ]]; then
+    log "striping ${#instance_store[@]} instance store devices"
+    mdadm --create "$RAID" --run --level=0 --raid-devices="${#instance_store[@]}" --name=weft-data "${instance_store[@]}"
+  fi
+  device="$RAID"
+elif ((${#instance_store[@]} == 1)); then
+  device="${instance_store[0]}"
+else
+  # amazon-ec2-utils links the EBS NVMe device to its launch-template name.
+  for _ in $(seq 1 90); do
+    [[ -e /dev/sdf ]] && break
+    sleep 2
+  done
+  [[ -e /dev/sdf ]] || {
+    log "no instance store and no EBS data volume at /dev/sdf"
+    exit 1
+  }
+  device="$(readlink -f /dev/sdf)"
+fi
+log "using $device"
+
+fstype="$(blkid -o value -s TYPE "$device" || true)"
+if [[ -z "$fstype" ]]; then
+  log "formatting $device as XFS with reflink"
+  mkfs.xfs -f -q -L "$LABEL" -m reflink=1,crc=1 "$device"
+elif [[ "$fstype" != "xfs" ]]; then
+  log "$device already has a $fstype filesystem; refusing to format it"
+  exit 1
+fi
+
+install -d -m 0755 -o root -g root "$MNT"
+# No nodev: the jailer creates /dev/kvm and /dev/net/tun inside each VM's
+# chroot under $MNT/jail. No noexec: the jailer executes Firecracker there.
+mount -t xfs -o noatime,nosuid "$device" "$MNT"
+if ! xfs_info "$MNT" | grep -q 'reflink=1'; then
+  log "$device is XFS without reflink; recreate the data volume"
+  umount "$MNT"
+  exit 1
+fi
+# The jailer's chroot base and its parents must not be writable by others.
+chown root:root "$MNT"
+chmod 0755 "$MNT"
+install -d -m 0755 -o root -g root "$MNT/jail"
+log "mounted $device at $MNT"

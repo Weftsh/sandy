@@ -1,0 +1,36 @@
+[Unit]
+Description=Weft host agent (runs sandboxes as Firecracker microVMs)
+Documentation=https://github.com/weftsh/byoc
+Wants=network-online.target
+After=network-online.target weft-data-volume.service weft-host-tuning.service
+Requires=weft-data-volume.service weft-host-tuning.service
+RequiresMountsFor=/var/lib/weft
+# Written by weft-host-bootstrap (from EC2 user data) on first boot.
+ConditionPathExists=/etc/weft/host-agent.env
+# Keep restarting for as long as the host lives.
+StartLimitIntervalSec=0
+
+[Service]
+Type=simple
+# Root: the agent creates network namespaces, tap devices, iptables rules and
+# mounts, and starts each microVM through the jailer, which drops to a
+# per-VM unprivileged UID inside a chroot.
+User=root
+EnvironmentFile=/etc/weft/host-agent.env
+ExecStart=/usr/local/bin/weft-host-agent run
+Restart=always
+RestartSec=2
+TimeoutStopSec=60
+LimitNOFILE=1048576
+LimitNPROC=infinity
+LimitCORE=0
+TasksMax=infinity
+# Under memory pressure the kernel should pick a microVM, not the agent.
+OOMScoreAdjust=-900
+# JSON log lines, shipped to CloudWatch Logs by the CloudWatch agent and
+# rotated by logrotate (copytruncate).
+StandardOutput=append:/var/log/weft/host-agent.log
+StandardError=inherit
+
+[Install]
+WantedBy=multi-user.target

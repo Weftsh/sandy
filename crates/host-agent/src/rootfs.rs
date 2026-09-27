@@ -33,7 +33,8 @@ pub enum RootfsError {
 }
 
 /// Normalizes an archive path to a relative path with no `.`/`..`/root
-/// components, or rejects it.
+/// components, or rejects it. The root itself (`./`) normalizes to an empty
+/// path.
 pub fn safe_relative(raw: &Path) -> Result<PathBuf, &'static str> {
     let mut out = PathBuf::new();
     for c in raw.components() {
@@ -43,9 +44,6 @@ pub fn safe_relative(raw: &Path) -> Result<PathBuf, &'static str> {
             Component::ParentDir => return Err("path contains `..`"),
             Component::Prefix(_) => return Err("path has a prefix"),
         }
-    }
-    if out.as_os_str().is_empty() {
-        return Err("empty path");
     }
     Ok(out)
 }
@@ -82,6 +80,10 @@ pub fn extract_layer<R: Read>(reader: R, root: &Path) -> Result<(), RootfsError>
         let raw = entry.path()?.into_owned();
         let display = raw.display().to_string();
         let rel = safe_relative(&raw).map_err(|why| RootfsError::Unsafe(display.clone(), why))?;
+        if rel.as_os_str().is_empty() {
+            // The layer's entry for the root directory itself.
+            continue;
+        }
         if has_symlink_ancestor(root, &rel)? {
             return Err(RootfsError::Unsafe(display, "writes through a symlink"));
         }
@@ -117,6 +119,9 @@ pub fn extract_layer<R: Read>(reader: R, root: &Path) -> Result<(), RootfsError>
                 .link_name()?
                 .ok_or_else(|| RootfsError::Unsafe(display.clone(), "hard link without target"))?;
             let link_rel = safe_relative(&link).map_err(|why| RootfsError::Unsafe(display.clone(), why))?;
+            if link_rel.as_os_str().is_empty() {
+                return Err(RootfsError::Unsafe(display, "hard link to the root directory"));
+            }
             if has_symlink_ancestor(root, &link_rel)? {
                 return Err(RootfsError::Unsafe(display, "hard link through a symlink"));
             }
@@ -303,6 +308,7 @@ mod tests {
     fn extracts_files_and_applies_whiteouts() {
         let dir = tempfile::tempdir().unwrap();
         let layer1 = tar_with(&[
+            ("./", tar::EntryType::Directory, b"", None),
             ("etc/", tar::EntryType::Directory, b"", None),
             ("etc/keep", tar::EntryType::Regular, b"1", None),
             ("etc/gone", tar::EntryType::Regular, b"2", None),

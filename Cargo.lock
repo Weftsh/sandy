@@ -2984,6 +2984,7 @@ dependencies = [
  "tracing",
  "tracing-subscriber",
  "url",
+ "weft-awsauth",
  "weft-netpolicy",
 ]
 

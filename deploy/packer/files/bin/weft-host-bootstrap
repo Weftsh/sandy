@@ -1,0 +1,117 @@
+#!/usr/bin/env bash
+# First-boot configuration of a Weft sandbox host, run from EC2 user data.
+#
+# User data writes the stack's settings to /etc/weft/stack.env. This script
+# checks them, adds the instance's identity from IMDSv2 (instance ID, private
+# IP), writes /etc/weft/host-agent.env, applies host tuning, points the
+# CloudWatch agent at the stack's log group, and starts the host agent.
+# On later boots the host agent starts on its own from the same file.
+set -euo pipefail
+umask 077
+export LC_ALL=C
+
+STACK_ENV=/etc/weft/stack.env
+AGENT_ENV=/etc/weft/host-agent.env
+CW_CONFIG=/opt/aws/amazon-cloudwatch-agent/etc/weft.json
+IMDS=http://169.254.169.254/latest
+
+install -d -m 0750 /var/log/weft
+exec > >(tee -a /var/log/weft/bootstrap.log) 2>&1
+
+log() { printf '%s weft-host-bootstrap: %s\n' "$(date -u +%Y-%m-%dT%H:%M:%SZ)" "$*"; }
+die() {
+  log "ERROR: $*"
+  exit 1
+}
+
+# Accept only known keys with conservative values: a mistake in user data
+# fails here, visibly, instead of reaching the agent.
+declare -A pattern=(
+  [WEFT_CONTROL_PLANE_URL]='^https://[a-z0-9]([a-z0-9.-]*[a-z0-9])?$'
+  [WEFT_AUTH]='^aws-iam$'
+  [WEFT_SERVER_ID]='^[A-Za-z0-9][A-Za-z0-9-]{0,127}$'
+  [AWS_REGION]='^[a-z]{2}(-[a-z]+)+-[0-9]+$'
+  [WEFT_EGRESS_GATEWAY]='^[a-z0-9]([a-z0-9.-]*[a-z0-9])?:[0-9]{1,5}$'
+  [WEFT_RUNTIME]='^firecracker$'
+  [WEFT_MAX_SANDBOXES]='^[1-9][0-9]{0,3}$'
+  [WEFT_SLOT_POOL]='^([0-9]{1,3}\.){3}[0-9]{1,3}/[0-9]{1,2}$'
+  [WEFT_DISABLE_SMT]='^(true|false)$'
+  [WEFT_HOST_LOG_GROUP]='^[A-Za-z0-9_/.#-]{1,512}$'
+)
+declare -A cfg=()
+
+[[ -r "$STACK_ENV" ]] || die "$STACK_ENV is missing (it is written by the stack's user data)"
+while IFS= read -r line || [[ -n "$line" ]]; do
+  [[ -z "$line" || "$line" == \#* ]] && continue
+  [[ "$line" == *=* ]] || die "malformed line in $STACK_ENV"
+  key="${line%%=*}"
+  value="${line#*=}"
+  [[ -n "${pattern[$key]+set}" ]] || die "unexpected setting $key in $STACK_ENV"
+  [[ "$value" =~ ${pattern[$key]} ]] || die "invalid value for $key in $STACK_ENV"
+  cfg[$key]="$value"
+done <"$STACK_ENV"
+for key in "${!pattern[@]}"; do
+  [[ -n "${cfg[$key]+set}" ]] || die "$key is missing from $STACK_ENV"
+done
+
+log "reading instance identity from IMDSv2"
+token="$(curl -sf --retry 10 --retry-connrefused --connect-timeout 2 -X PUT "$IMDS/api/token" \
+  -H 'X-aws-ec2-metadata-token-ttl-seconds: 300')" || die "IMDSv2 token request failed"
+metadata() {
+  curl -sf --retry 5 --retry-connrefused --connect-timeout 2 -H "X-aws-ec2-metadata-token: $token" "$IMDS/meta-data/$1"
+}
+instance_id="$(metadata instance-id)" || die "could not read the instance ID"
+private_ip="$(metadata local-ipv4)" || die "could not read the private IP"
+[[ "$instance_id" =~ ^i-[0-9a-f]{8,17}$ ]] || die "unexpected instance ID $instance_id"
+[[ "$private_ip" =~ ^([0-9]{1,3}\.){3}[0-9]{1,3}$ ]] || die "unexpected private IP $private_ip"
+
+log "writing $AGENT_ENV for $instance_id ($private_ip)"
+tmp="$(mktemp /etc/weft/.host-agent.env.XXXXXX)"
+{
+  echo "# Written by weft-host-bootstrap on first boot. Flags: weft-host-agent run --help"
+  echo "WEFT_HOST_ID=$instance_id"
+  echo "WEFT_PRIVATE_IP=$private_ip"
+  for key in WEFT_CONTROL_PLANE_URL WEFT_AUTH WEFT_SERVER_ID AWS_REGION WEFT_EGRESS_GATEWAY WEFT_RUNTIME WEFT_MAX_SANDBOXES WEFT_SLOT_POOL; do
+    echo "$key=${cfg[$key]}"
+  done
+  echo "WEFT_DATA_DIR=/var/lib/weft"
+  echo "WEFT_GUEST_DIR=/opt/weft/guest"
+  echo "WEFT_KERNEL=/opt/weft/guest/vmlinux"
+  echo "WEFT_FIRECRACKER_BIN=/usr/local/bin/firecracker"
+  echo "WEFT_JAILER_BIN=/usr/local/bin/jailer"
+  echo "RUST_LOG=info"
+} >"$tmp"
+chmod 0600 "$tmp"
+mv -f "$tmp" "$AGENT_ENV"
+
+# SMT follows WEFT_DISABLE_SMT from stack.env; the agent sizes itself from
+# the CPUs online when it starts, so this runs first.
+log "applying host tuning"
+systemctl restart weft-host-tuning.service
+
+log "configuring the CloudWatch agent for ${cfg[WEFT_HOST_LOG_GROUP]}"
+install -d -m 0755 "$(dirname "$CW_CONFIG")"
+jq -n --arg group "${cfg[WEFT_HOST_LOG_GROUP]}" '{
+  agent: { run_as_user: "root", omit_hostname: true },
+  logs: {
+    logs_collected: {
+      files: {
+        collect_list: [
+          { file_path: "/var/log/weft/host-agent.log", log_group_name: $group,
+            log_stream_name: "{instance_id}/host-agent", timestamp_format: "%Y-%m-%dT%H:%M:%S" },
+          { file_path: "/var/log/weft/bootstrap.log", log_group_name: $group,
+            log_stream_name: "{instance_id}/bootstrap" }
+        ]
+      }
+    }
+  }
+}' >"$CW_CONFIG"
+chmod 0644 "$CW_CONFIG"
+# Logs are important but not a reason to keep the host from serving.
+/opt/aws/amazon-cloudwatch-agent/bin/amazon-cloudwatch-agent-ctl -a fetch-config -m ec2 -s -c "file:$CW_CONFIG" ||
+  log "WARNING: the CloudWatch agent did not start; host logs stay in /var/log/weft"
+
+log "starting the data volume and the host agent"
+systemctl start weft-data-volume.service
+systemctl start weft-host-agent.service
+log "done"

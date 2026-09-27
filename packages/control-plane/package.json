@@ -1,0 +1,36 @@
+{
+  "name": "@weftsh/sandbox-control-plane",
+  "version": "0.1.0",
+  "private": true,
+  "description": "Weft Sandboxes control plane: E2B-compatible API, scheduler, edge proxy and licensing",
+  "license": "FSL-1.1-ALv2",
+  "type": "module",
+  "main": "dist/main.js",
+  "bin": {
+    "weft-control-plane": "dist/main.js"
+  },
+  "files": ["dist"],
+  "scripts": {
+    "build": "tsc -p tsconfig.build.json",
+    "typecheck": "tsc -p tsconfig.json --noEmit",
+    "test": "vitest run",
+    "start": "node dist/main.js"
+  },
+  "dependencies": {
+    "@aws-sdk/client-cloudwatch": "3.1141.0",
+    "@aws-sdk/client-dynamodb": "3.1141.0",
+    "@aws-sdk/client-ecr": "3.1141.0",
+    "@aws-sdk/client-license-manager": "3.1141.0",
+    "@aws-sdk/client-s3": "3.1141.0",
+    "@aws-sdk/client-sts": "3.1141.0",
+    "@aws-sdk/lib-dynamodb": "3.1141.0",
+    "@aws-sdk/s3-request-presigner": "3.1141.0",
+    "@weftsh/sandbox-license": "workspace:*",
+    "fastify": "5.12.5"
+  },
+  "devDependencies": {
+    "@types/node": "^22.20.4",
+    "typescript": "~6.0.3",
+    "vitest": "^4.1.11"
+  }
+}

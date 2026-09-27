@@ -30,3 +30,6 @@ admin-key.txt
 .vscode/
 *.swp
 .DS_Store
+
+# Agent worktrees and local tooling state
+.claude/

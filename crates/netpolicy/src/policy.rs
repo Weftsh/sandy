@@ -132,7 +132,9 @@ impl HostPattern {
             Self::Subdomains(d) => name.len() > d.len() + 1
                 && name.ends_with(d.as_str())
                 && name.as_bytes()[name.len() - d.len() - 1] == b'.',
-            Self::AnyPublic => true,
+            // Single-label names (`localhost`, `metadata`, search-domain
+            // shortcuts) are internal by nature; `*` covers public FQDNs only.
+            Self::AnyPublic => name.contains('.'),
             Self::Cidr(_) => false,
         }
     }
@@ -140,10 +142,15 @@ impl HostPattern {
 
 /// Lowercases a hostname, strips one trailing dot and checks RFC 1123 syntax.
 /// Returns `None` for anything that is not a plausible DNS name, including IP
-/// address literals.
+/// address literals and the numeric forms resolvers treat as IPv4 addresses
+/// (`127.1`, `2130706433`): a name's last label is never all digits.
 pub fn normalize_hostname(name: &str) -> Option<String> {
     let name = name.strip_suffix('.').unwrap_or(name).to_ascii_lowercase();
     if name.is_empty() || name.len() > 253 || name.parse::<IpAddr>().is_ok() {
+        return None;
+    }
+    let last = name.rsplit('.').next().unwrap_or_default();
+    if last.bytes().all(|b| b.is_ascii_digit()) {
         return None;
     }
     let valid = name.split('.').all(|label| {
@@ -284,6 +291,12 @@ impl CompiledPolicy {
                 pattern: HostPattern::Exact(host.clone()),
                 ports: vec![443],
             });
+            if credentials.iter().any(|c: &CredentialRule| c.host == host) {
+                return Err(PolicyError::InvalidCredential {
+                    index,
+                    reason: "another credential rule already covers this host",
+                });
+            }
             credentials.push(CredentialRule {
                 host,
                 header: cred.header.to_ascii_lowercase(),
@@ -525,6 +538,27 @@ mod tests {
         assert!(CompiledPolicy::compile(&cred("x-key", Some("{{secret}}\r\nx: y"), "a.com")).is_err());
         assert!(CompiledPolicy::compile(&cred("x-key", None, "*.a.com")).is_err());
         assert!(CompiledPolicy::compile(&cred("x-key", None, "a.com")).is_ok());
+    }
+
+    #[test]
+    fn numeric_and_single_label_names_are_not_public_hostnames() {
+        for name in ["127.1", "2130706433", "0x7f.1", "10.0.0.1."] {
+            assert_eq!(normalize_hostname(name), None, "{name}");
+        }
+        let p = policy(r#"{"allow":[{"host":"*"}]}"#);
+        assert!(!p.may_resolve("localhost"));
+        assert!(!p.may_resolve("metadata"));
+        assert!(!p.check_name("127.1", 80).is_allowed());
+        assert!(p.may_resolve("example.com"));
+    }
+
+    #[test]
+    fn rejects_duplicate_credential_hosts() {
+        let p: EgressPolicy = serde_json::from_str(
+            r#"{"credentials":[{"host":"a.com","header":"x","secretId":"1"},{"host":"A.com.","header":"y","secretId":"2"}]}"#,
+        )
+        .unwrap();
+        assert!(matches!(CompiledPolicy::compile(&p), Err(PolicyError::InvalidCredential { index: 1, .. })));
     }
 
     #[test]

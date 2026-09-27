@@ -1,0 +1,37 @@
+{
+  "name": "@weftsh/deploy-functions",
+  "version": "0.1.0",
+  "private": true,
+  "description": "Lambda-backed CloudFormation custom resources for the Weft Sandboxes install: release verification, egress CA and bucket cleanup",
+  "license": "Apache-2.0",
+  "type": "module",
+  "packageManager": "pnpm@10.33.0",
+  "engines": {
+    "node": ">=22"
+  },
+  "scripts": {
+    "typecheck": "tsc -p tsconfig.json --noEmit",
+    "test": "vitest run",
+    "fetch-trusted-root": "node scripts/fetch-trusted-root.mjs",
+    "build": "node scripts/build.mjs"
+  },
+  "dependencies": {
+    "@aws-sdk/client-ec2": "3.1141.0",
+    "@aws-sdk/client-kms": "3.1141.0",
+    "@aws-sdk/client-lambda": "3.1141.0",
+    "@aws-sdk/client-s3": "3.1141.0",
+    "@aws-sdk/client-secrets-manager": "3.1141.0",
+    "@aws-sdk/client-ssm": "3.1141.0",
+    "@sigstore/bundle": "5.0.0",
+    "@sigstore/protobuf-specs": "0.5.2",
+    "@sigstore/verify": "4.1.2"
+  },
+  "devDependencies": {
+    "@sigstore/tuf": "5.0.0",
+    "@types/aws-lambda": "8.10.163",
+    "@types/node": "^22.20.4",
+    "esbuild": "0.28.2",
+    "typescript": "~6.0.3",
+    "vitest": "^4.1.11"
+  }
+}

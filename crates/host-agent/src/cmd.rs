@@ -4,6 +4,7 @@
 
 use std::fmt;
 use std::process::Stdio;
+#[cfg(test)]
 use std::sync::Mutex;
 
 use tokio::io::AsyncWriteExt;
@@ -118,11 +119,13 @@ pub async fn run_all<R: Runner>(runner: &R, plan: &[Cmd]) -> Result<(), CmdError
 }
 
 /// Records commands instead of running them.
+#[cfg(test)]
 #[derive(Debug, Default)]
 pub struct RecordingRunner {
     pub commands: Mutex<Vec<Cmd>>,
 }
 
+#[cfg(test)]
 impl Runner for RecordingRunner {
     async fn run(&self, cmd: &Cmd) -> Result<(), CmdError> {
         self.commands.lock().expect("poisoned").push(cmd.clone());

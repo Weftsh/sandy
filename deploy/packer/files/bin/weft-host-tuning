@@ -1,0 +1,64 @@
+#!/usr/bin/env bash
+# Boot-time host settings from Firecracker's production host setup guide
+# (docs/prod-host-setup.md) that are not sysctls. Runs before the host
+# agent on every boot, and again from weft-host-bootstrap on first boot.
+set -uo pipefail
+export LC_ALL=C
+
+log() { printf 'weft-host-tuning: %s\n' "$*"; }
+write() {
+  # write VALUE FILE: best effort, logged.
+  if [[ -w "$2" ]] && printf '%s' "$1" >"$2" 2>/dev/null; then
+    log "$2 = $1"
+  else
+    log "could not set $2 to $1"
+  fi
+}
+
+# No swap: guest memory must never reach disk.
+swapoff -a
+
+# Kernel Samepage Merging off: page deduplication enables cross-VM side
+# channels. 2 = stop and unmerge everything already merged.
+[[ -e /sys/kernel/mm/ksm/run ]] && write 2 /sys/kernel/mm/ksm/run
+
+# Simultaneous multithreading off for tenant separation, unless the stack
+# set WEFT_DISABLE_SMT=false. Before user data has run (first boot), the
+# safe default applies.
+disable_smt=true
+if [[ -r /etc/weft/stack.env ]]; then
+  v="$(sed -n 's/^WEFT_DISABLE_SMT=//p' /etc/weft/stack.env | tail -n1)"
+  [[ "$v" == "true" || "$v" == "false" ]] && disable_smt="$v"
+fi
+smt=/sys/devices/system/cpu/smt/control
+if [[ -e "$smt" ]]; then
+  state="$(cat "$smt")"
+  if [[ "$disable_smt" == "true" && "$state" == "on" ]]; then
+    write off "$smt"
+  elif [[ "$disable_smt" == "false" && "$state" == "off" ]]; then
+    write on "$smt"
+  else
+    log "SMT is $state"
+  fi
+fi
+
+# KVM: nested virtualization (C8i/M8i/R8i) or bare metal provides VMX/SVM;
+# without /dev/kvm this is not a usable host.
+modprobe kvm_intel 2>/dev/null || modprobe kvm_amd 2>/dev/null || true
+if [[ ! -c /dev/kvm ]]; then
+  log "ERROR: /dev/kvm is missing; hosts need nested virtualization (C8i, M8i, R8i) or a .metal instance type"
+  exit 1
+fi
+udevadm trigger --action=change --sysname-match=kvm >/dev/null 2>&1 || true
+
+# Linux 6.1+ KVM_CREATE_VM latency (prod-host-setup.md, "boot time
+# regressions"): favordynmods on cgroup v2, and nx_huge_pages=never only on
+# CPUs that are not affected by iTLB multihit.
+if [[ "$(stat -f -c %T /sys/fs/cgroup)" == "cgroup2fs" ]]; then
+  mount -o remount,favordynmods /sys/fs/cgroup && log "cgroup2 remounted with favordynmods"
+fi
+if grep -q '^Not affected' /sys/devices/system/cpu/vulnerabilities/itlb_multihit 2>/dev/null; then
+  write never /sys/module/kvm/parameters/nx_huge_pages
+fi
+
+exit 0

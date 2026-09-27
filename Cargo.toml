@@ -2,7 +2,9 @@
 resolver = "2"
 members = [
   "crates/netpolicy",
+  "crates/awsauth",
   "crates/host-agent",
+  "crates/egress-gateway",
   "crates/guest-init",
 ]
 

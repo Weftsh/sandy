@@ -1,0 +1,14 @@
+[Unit]
+Description=Weft data volume (XFS with reflink) at /var/lib/weft
+Documentation=https://github.com/weftsh/byoc/tree/main/deploy
+After=local-fs.target
+Before=weft-host-agent.service
+
+[Service]
+Type=oneshot
+RemainAfterExit=yes
+ExecStart=/usr/local/sbin/weft-data-volume
+TimeoutStartSec=5min
+
+[Install]
+WantedBy=multi-user.target

@@ -87,6 +87,13 @@ impl Runtime {
         }
     }
 
+    /// Removes guests a previous agent process left running.
+    pub async fn cleanup_leftovers(&self) {
+        if let Runtime::Namespace(r) = self {
+            r.cleanup_leftovers().await;
+        }
+    }
+
     /// How the guest attaches to its slot namespace.
     pub fn guest_link(&self, slot: &Slot) -> GuestLink {
         match self {

@@ -68,7 +68,9 @@ fn classify_v6(ip: Ipv6Addr) -> IpClass {
         || (s[0] & 0xffc0) == 0xfe80 // fe80::/10 link-local
         || (s[0] == 0xfd00 && s[1] == 0x0ec2) // fd00:ec2::/32 EC2 IMDS, DNS and NTP
         || (s[0] == 0x2001 && s[1] == 0x0db8) // documentation
-        || (s[0] == 0x0064 && s[1] == 0xff9b) // NAT64 well-known prefix could reach IPv4 internals
+        || (s[0] == 0x0064 && s[1] == 0xff9b) // NAT64 prefixes (well-known and local-use) embed IPv4
+        || s[0] == 0x2002 // 6to4 embeds an IPv4 address
+        || (s[0] == 0x2001 && s[1] == 0) // Teredo embeds an IPv4 address
         || s[0] == 0; // ::/16 reserved, includes IPv4-compatible addresses
     if forbidden {
         return IpClass::Forbidden;
@@ -93,6 +95,9 @@ mod tests {
         assert_eq!(class("169.254.169.254"), IpClass::Forbidden);
         assert_eq!(class("::ffff:169.254.169.254"), IpClass::Forbidden);
         assert_eq!(class("fd00:ec2::254"), IpClass::Forbidden);
+        assert_eq!(class("64:ff9b:1::a9fe:a9fe"), IpClass::Forbidden);
+        assert_eq!(class("2002:a9fe:a9fe::1"), IpClass::Forbidden);
+        assert_eq!(class("2001:0:4136:e378::1"), IpClass::Forbidden);
         assert_eq!(class("169.254.170.2"), IpClass::Forbidden); // ECS task metadata
     }
 

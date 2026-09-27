@@ -1,0 +1,4 @@
+# The compatibility suite runs the unmodified, pinned E2B Python SDK.
+e2b==2.51.0
+pytest==9.1.1
+httpx==0.28.1

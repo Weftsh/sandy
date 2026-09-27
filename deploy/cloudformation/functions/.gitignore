@@ -1,0 +1,4 @@
+# Fetched from Sigstore's TUF repository by the release workflow.
+/src/verify-release/trusted-root.json
+/dist/
+/node_modules/

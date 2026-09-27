@@ -65,6 +65,26 @@ impl NamespaceRuntime {
         Self { data_dir, freezer }
     }
 
+    /// Kills guests left behind by a previous agent process (crash, restart)
+    /// and removes their cgroups.
+    pub async fn cleanup_leftovers(&self) {
+        let root = match &self.freezer {
+            Freezer::V2 { root } | Freezer::V1 { root } => root.clone(),
+            Freezer::None => return,
+        };
+        let Ok(mut entries) = tokio::fs::read_dir(&root).await else { return };
+        while let Ok(Some(entry)) = entries.next_entry().await {
+            let cg = entry.path();
+            if !cg.is_dir() {
+                continue;
+            }
+            let _ = self.set_frozen(&cg, false).await;
+            kill_cgroup(&cg).await;
+            let _ = tokio::fs::remove_dir(&cg).await;
+            tracing::info!(cgroup = %cg.display(), "removed leftover sandbox");
+        }
+    }
+
     pub fn guest_link(&self, slot: &Slot) -> GuestLink {
         GuestLink::Veth { guest_netns: format!("weft-g{}", slot.index) }
     }

@@ -1,0 +1,46 @@
+[package]
+name = "weft-egress-gateway"
+description = "Weft egress gateway: enforces per-sandbox egress policy and injects credentials into allowlisted HTTPS APIs"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+repository.workspace = true
+rust-version.workspace = true
+
+[[bin]]
+name = "weft-egress-gateway"
+path = "src/main.rs"
+
+[dependencies]
+weft-awsauth = { path = "../awsauth" }
+weft-netpolicy = { path = "../netpolicy" }
+
+anyhow = "1"
+aws-config = { version = "1.8", default-features = false, features = ["rt-tokio", "default-https-client"] }
+aws-sdk-secretsmanager = { version = "1", default-features = false, features = ["rt-tokio", "default-https-client"] }
+bytes = "1"
+clap = { version = "4", features = ["derive", "env"] }
+http = "1"
+http-body-util = "0.1"
+httparse = "1"
+hyper = { version = "1", features = ["server", "client", "http1"] }
+hyper-util = { version = "0.1", features = ["tokio"] }
+rcgen = { version = "0.14", default-features = false, features = ["aws_lc_rs", "pem", "x509-parser"] }
+reqwest = { version = "0.13", default-features = false, features = ["rustls", "json"] }
+rustls = "0.23"
+serde = { version = "1", features = ["derive"] }
+serde_json = "1"
+thiserror = "2"
+time = "0.3"
+tokio = { version = "1", features = ["full"] }
+tokio-rustls = "0.26"
+tracing = "0.1"
+tracing-subscriber = { version = "0.3", features = ["env-filter", "json"] }
+webpki-roots = "1"
+
+[dev-dependencies]
+tempfile = "3"
+tokio = { version = "1", features = ["full", "test-util"] }
+
+[lints]
+workspace = true

@@ -1,0 +1,3120 @@
+AWSTemplateFormatVersion: "2010-09-09"
+Description: >-
+  Weft Sandboxes: self-hosted, E2B-SDK-compatible Firecracker sandboxes that run
+  entirely inside this AWS account. Private subnets, internal load balancer,
+  customer-managed KMS key, no vendor access. (weft-sandboxes 0.0.0-dev)
+
+# ---------------------------------------------------------------------------
+# How this template is organized
+#
+#   1. Encryption key and logs      (DataKey, *LogGroup)
+#   2. Custom resources that gate everything else:
+#        ReleaseVerification  - refuses to continue unless the release manifest
+#                               is Sigstore-signed by this repository's release
+#                               workflow and lists the AMI, image digests and
+#                               Lambda code used here
+#        NetworkPreflight     - checks the VPC, subnets, slot pool and host
+#                               instance types
+#        EgressCa             - generates the egress interception CA
+#        Cleanup              - empties and deletes buckets on stack deletion
+#   3. Network                      (VPC, subnets, NAT, endpoints, security groups)
+#   4. Data                         (DynamoDB tables, S3 bucket, ECR, secrets)
+#   5. Control plane                (ECS Fargate: api, edge, worker, egress gateway)
+#   6. Load balancing and DNS       (ALB, ACM, Route 53 private zone, Cloud Map)
+#   7. Hosts                        (launch template, Auto Scaling group, scaling)
+#
+# The release workflow (.github/workflows/release.yml) publishes this file with
+# the Release and HostAmi mappings, the SupportedRegion rule and the version
+# strings filled in (see deploy/cloudformation/scripts/render_release_template.py).
+# ---------------------------------------------------------------------------
+
+Metadata:
+  AWS::CloudFormation::Interface:
+    ParameterGroups:
+      - Label: { default: "Required" }
+        Parameters: [DomainName, PublicHostedZoneId, CertificateArn, LicenseKey]
+      - Label: { default: "Licensing" }
+        Parameters: [LicenseMode, MarketplaceProductSku]
+      - Label: { default: "Access" }
+        Parameters: [LoadBalancerScheme, ClientCidr, PublicAllowedCidr]
+      - Label: { default: "Network" }
+        Parameters:
+          - VpcId
+          - PrivateSubnetIds
+          - PublicSubnetIds
+          - VpcCidr
+          - NatGatewayCount
+          - CreateInterfaceEndpoints
+          - EnableVpcFlowLogs
+          - InternalDomain
+          - SlotPoolCidr
+      - Label: { default: "Sandbox hosts" }
+        Parameters:
+          - HostVirtualization
+          - HostInstanceType
+          - HostInstanceTypeAlt1
+          - HostInstanceTypeAlt2
+          - HostMinSize
+          - HostMaxSize
+          - HostOnDemandBaseCapacity
+          - HostOnDemandPercentageAboveBase
+          - HostTargetSlotUtilization
+          - MaxSandboxesPerHost
+          - HostDataVolumeGiB
+          - HostDataVolumeIops
+          - HostDataVolumeThroughput
+          - HostDisableSmt
+          - HostInternetAccess
+          - HostEbsKmsKeyArn
+      - Label: { default: "Control plane" }
+        Parameters:
+          - ControlPlaneTaskSize
+          - ApiDesiredCount
+          - EdgeDesiredCount
+          - GatewayDesiredCount
+          - BootstrapTemplates
+      - Label: { default: "Operations and compliance" }
+        Parameters:
+          - RetainBucketsOnDelete
+          - LogRetentionDays
+          - AccessLogsBucketName
+          - PermissionsBoundaryArn
+      - Label: { default: "Advanced: release artifacts (leave blank unless mirroring)" }
+        Parameters: [HostAmiId, ControlPlaneImage, GatewayImage, ReleaseBucketPrefix]
+    ParameterLabels:
+      DomainName: { default: "Sandbox domain (E2B_DOMAIN)" }
+      PublicHostedZoneId: { default: "Public hosted zone for certificate validation" }
+      CertificateArn: { default: "Existing ACM certificate (instead of a hosted zone)" }
+      LicenseKey: { default: "Weft license key" }
+
+Parameters:
+  # --- Required -------------------------------------------------------------
+  DomainName:
+    Type: String
+    Description: >-
+      Domain your clients use as E2B_DOMAIN, e.g. sandbox.example.com. The API is
+      https://api.<domain> and sandboxes are https://<port>-<sandbox-id>.<domain>.
+      The stack creates a Route 53 private hosted zone for it in the VPC.
+    AllowedPattern: "^(?=.{4,190}$)([a-z0-9]([a-z0-9-]{0,61}[a-z0-9])?\\.)+[a-z][a-z0-9-]{0,61}[a-z0-9]$"
+    ConstraintDescription: a lowercase DNS name such as sandbox.example.com
+  PublicHostedZoneId:
+    Type: String
+    Default: ""
+    Description: >-
+      Route 53 public hosted zone that contains DomainName (the zone for the domain
+      or a parent). The stack creates an ACM certificate for api.<domain> and
+      *.<domain> with DNS validation in this zone. Leave blank if you give CertificateArn.
+    AllowedPattern: "^$|^Z[A-Z0-9]{1,32}$"
+  CertificateArn:
+    Type: String
+    Default: ""
+    Description: >-
+      Existing ACM certificate in this Region covering api.<domain> and *.<domain>.
+      Leave blank to have the stack create one (requires PublicHostedZoneId).
+    AllowedPattern: "^$|^arn:aws[a-z-]*:acm:[a-z0-9-]+:[0-9]{12}:certificate/[0-9a-f-]{36}$"
+  LicenseKey:
+    Type: String
+    NoEcho: true
+    Default: ""
+    Description: Your Weft license key (stored in Secrets Manager, encrypted with the stack's KMS key). Not needed with LicenseMode=marketplace.
+
+  # --- Licensing ------------------------------------------------------------
+  LicenseMode:
+    Type: String
+    Default: key
+    AllowedValues: [key, marketplace]
+    Description: "key: a Weft license key. marketplace: an AWS Marketplace entitlement through AWS License Manager."
+  MarketplaceProductSku:
+    Type: String
+    Default: ""
+    Description: AWS Marketplace product SKU (LicenseMode=marketplace only).
+    AllowedPattern: "^[A-Za-z0-9-]*$"
+
+  # --- Access ---------------------------------------------------------------
+  LoadBalancerScheme:
+    Type: String
+    Default: internal
+    AllowedValues: [internal, internet-facing]
+    Description: >-
+      internal (recommended): the API and sandboxes are reachable only from the VPC
+      and networks connected to it. internet-facing: additionally creates a public
+      load balancer restricted to PublicAllowedCidr, for evaluation.
+  ClientCidr:
+    Type: String
+    Default: ""
+    Description: CIDR allowed to reach the internal load balancer on 443. Leave blank for the VPC CIDR.
+    AllowedPattern: "^$|^([0-9]{1,3}\\.){3}[0-9]{1,3}/([0-9]|[1-2][0-9]|3[0-2])$"
+  PublicAllowedCidr:
+    Type: String
+    Default: ""
+    Description: With LoadBalancerScheme=internet-facing, the only CIDR allowed to reach the public load balancer (0.0.0.0/0 is refused).
+    AllowedPattern: "^$|^([0-9]{1,3}\\.){3}[0-9]{1,3}/([0-9]|[1-2][0-9]|3[0-2])$"
+
+  # --- Network --------------------------------------------------------------
+  VpcId:
+    Type: String
+    Default: ""
+    Description: Existing VPC to install into. Leave blank to create a new VPC with two Availability Zones.
+    AllowedPattern: "^$|^vpc-[0-9a-f]{8,17}$"
+  PrivateSubnetIds:
+    Type: CommaDelimitedList
+    Default: ""
+    Description: With VpcId, two or more private subnets in different Availability Zones, with a route to a NAT gateway.
+  PublicSubnetIds:
+    Type: CommaDelimitedList
+    Default: ""
+    Description: With VpcId and LoadBalancerScheme=internet-facing, two or more public subnets for the public load balancer.
+  VpcCidr:
+    Type: String
+    Default: 10.0.0.0/16
+    Description: CIDR of the new VPC (/16 to /18). Ignored with VpcId.
+    AllowedPattern: "^([0-9]{1,3}\\.){3}[0-9]{1,3}/(1[6-8])$"
+  NatGatewayCount:
+    Type: String
+    Default: "2"
+    AllowedValues: ["1", "2"]
+    Description: NAT gateways for the new VPC. 2 (one per Availability Zone) survives an AZ outage; 1 saves about $33/month.
+  CreateInterfaceEndpoints:
+    Type: String
+    Default: "false"
+    AllowedValues: ["true", "false"]
+    Description: >-
+      Create VPC interface endpoints (ECR, CloudWatch, Secrets Manager, STS, KMS, SSM)
+      in the new VPC so AWS API traffic never uses the NAT gateway. About $15/month per
+      endpoint. S3 and DynamoDB gateway endpoints are always created (free).
+  EnableVpcFlowLogs:
+    Type: String
+    Default: "false"
+    AllowedValues: ["true", "false"]
+    Description: Send VPC flow logs to a KMS-encrypted CloudWatch Logs group.
+  InternalDomain:
+    Type: String
+    Default: weft.internal
+    Description: Cloud Map private DNS namespace for the egress gateway. Change it if another install shares the VPC.
+    AllowedPattern: "^([a-z0-9]([a-z0-9-]{0,61}[a-z0-9])?\\.)+[a-z][a-z0-9-]{0,61}[a-z0-9]$"
+  SlotPoolCidr:
+    Type: String
+    Default: 10.200.0.0/16
+    Description: Address pool for per-sandbox links on each host (one /30 per sandbox). Must not overlap the VPC; checked before hosts launch.
+    AllowedPattern: "^([0-9]{1,3}\\.){3}[0-9]{1,3}/([0-9]|[1-2][0-9]|3[0-2])$"
+
+  # --- Hosts ----------------------------------------------------------------
+  HostVirtualization:
+    Type: String
+    Default: nested
+    AllowedValues: [nested, metal]
+    Description: "nested: C8i/M8i/R8i instances with EC2 nested virtualization. metal: .metal instance types."
+  HostInstanceType:
+    Type: String
+    Default: c8i.2xlarge
+    Description: Primary host instance type (x86_64). Used first for on-demand capacity.
+    AllowedPattern: "^[a-z][a-z0-9-]*\\.[a-z0-9-]+$"
+  HostInstanceTypeAlt1:
+    Type: String
+    Default: m8i.2xlarge
+    Description: Additional instance type for Spot diversification (blank for none). Use the same vCPU count as the primary type.
+    AllowedPattern: "^$|^[a-z][a-z0-9-]*\\.[a-z0-9-]+$"
+  HostInstanceTypeAlt2:
+    Type: String
+    Default: r8i.2xlarge
+    Description: Additional instance type for Spot diversification (blank for none).
+    AllowedPattern: "^$|^[a-z][a-z0-9-]*\\.[a-z0-9-]+$"
+  HostMinSize:
+    Type: Number
+    Default: 1
+    MinValue: 0
+    MaxValue: 1000
+    Description: Minimum number of hosts.
+  HostMaxSize:
+    Type: Number
+    Default: 10
+    MinValue: 1
+    MaxValue: 1000
+    Description: Maximum number of hosts.
+  HostOnDemandBaseCapacity:
+    Type: Number
+    Default: 1
+    MinValue: 0
+    Description: Hosts that are always On-Demand. Capacity above this is Spot first.
+  HostOnDemandPercentageAboveBase:
+    Type: Number
+    Default: 0
+    MinValue: 0
+    MaxValue: 100
+    Description: Percentage of capacity above the base that is On-Demand (0 = all Spot).
+  HostTargetSlotUtilization:
+    Type: Number
+    Default: 70
+    MinValue: 10
+    MaxValue: 95
+    Description: Target average sandbox slot utilization (percent) for scaling the host fleet.
+  MaxSandboxesPerHost:
+    Type: Number
+    Default: 32
+    MinValue: 1
+    MaxValue: 1024
+    Description: Most sandboxes one host runs at once.
+  HostDataVolumeGiB:
+    Type: Number
+    Default: 200
+    MinValue: 50
+    MaxValue: 16384
+    Description: Size of the gp3 data volume for /var/lib/weft (XFS with reflink). Instance store NVMe is used instead when the type has it.
+  HostDataVolumeIops:
+    Type: Number
+    Default: 3000
+    MinValue: 3000
+    MaxValue: 80000
+    Description: Provisioned IOPS of the data volume.
+  HostDataVolumeThroughput:
+    Type: Number
+    Default: 250
+    MinValue: 125
+    MaxValue: 2000
+    Description: Provisioned throughput (MiB/s) of the data volume, at most HostDataVolumeIops / 4.
+  HostDisableSmt:
+    Type: String
+    Default: "true"
+    AllowedValues: ["true", "false"]
+    Description: >-
+      Turn off simultaneous multithreading on hosts, as Firecracker recommends for
+      multi-tenant isolation (halves the vCPUs available to sandboxes).
+  HostInternetAccess:
+    Type: String
+    Default: enabled
+    AllowedValues: [enabled, disabled]
+    Description: >-
+      enabled: hosts may open HTTPS connections to the internet through NAT, which
+      template builds from public registries (Docker Hub, GHCR, including the default
+      bootstrap template) need. disabled: hosts reach only the control plane, the egress
+      gateway, S3 and VPC interface endpoints; template images must come from ECR.
+      Sandbox traffic always goes through the egress gateway either way.
+  HostEbsKmsKeyArn:
+    Type: String
+    Default: ""
+    Description: >-
+      KMS key for host EBS volumes. Blank uses the AWS managed key aws/ebs. A customer
+      managed key must allow the EC2 Auto Scaling service-linked role to use it.
+    AllowedPattern: "^$|^arn:aws[a-z-]*:kms:[a-z0-9-]+:[0-9]{12}:key/[0-9a-f-]{36}$"
+
+  # --- Control plane --------------------------------------------------------
+  ControlPlaneTaskSize:
+    Type: String
+    Default: small
+    AllowedValues: [small, medium, large]
+    Description: "Fargate size of each api, edge and gateway task. small: 0.5 vCPU/1 GB, medium: 1 vCPU/2 GB, large: 2 vCPU/4 GB."
+  ApiDesiredCount:
+    Type: Number
+    Default: 2
+    MinValue: 2
+    MaxValue: 50
+    Description: API tasks (at least 2 for availability).
+  EdgeDesiredCount:
+    Type: Number
+    Default: 2
+    MinValue: 2
+    MaxValue: 50
+    Description: Edge proxy tasks (at least 2 for availability).
+  GatewayDesiredCount:
+    Type: Number
+    Default: 2
+    MinValue: 1
+    MaxValue: 50
+    Description: Egress gateway tasks.
+  BootstrapTemplates:
+    Type: String
+    Default: base=ghcr.io/weftsh/sandbox-base:0.0.0-dev
+    Description: Comma-separated name=image pairs built as public templates at first start.
+    AllowedPattern: "^$|^[a-z0-9][a-z0-9_-]*=[^,\\s]+(,[a-z0-9][a-z0-9_-]*=[^,\\s]+)*$"
+  # --- Operations -----------------------------------------------------------
+  RetainBucketsOnDelete:
+    Type: String
+    Default: "false"
+    AllowedValues: ["true", "false"]
+    Description: >-
+      true keeps the artifacts bucket (templates, paused-sandbox snapshots) and the KMS
+      key that encrypts it when the stack is deleted. false deletes them.
+  LogRetentionDays:
+    Type: Number
+    Default: 365
+    AllowedValues: [30, 60, 90, 120, 150, 180, 365, 400, 545, 731, 1096, 1827, 2192, 2557, 2922, 3288, 3653]
+    Description: CloudWatch Logs retention for all of the stack's log groups.
+  AccessLogsBucketName:
+    Type: String
+    Default: ""
+    Description: >-
+      Existing S3 bucket (SSE-S3) that receives load balancer access logs and S3 server
+      access logs, e.g. your log archive bucket. Its policy must allow ELB and S3 log
+      delivery. Blank disables access logging.
+    AllowedPattern: "^$|^[a-z0-9][a-z0-9.-]{1,61}[a-z0-9]$"
+  PermissionsBoundaryArn:
+    Type: String
+    Default: ""
+    Description: IAM permissions boundary to attach to every role the stack creates (blank for none).
+    AllowedPattern: "^$|^arn:aws[a-z-]*:iam::([0-9]{12}|aws):policy/.+$"
+
+  # --- Release artifacts (advanced) -----------------------------------------
+  HostAmiId:
+    Type: String
+    Default: ""
+    Description: Blank uses this release's AMI for the Region. Any value must still be the signed release AMI.
+    AllowedPattern: "^$|^ami-[0-9a-f]{8,17}$"
+  ControlPlaneImage:
+    Type: String
+    Default: ""
+    Description: >-
+      Blank uses this release's image. To run from a mirror (for example ECR in this
+      account), give <repository>@sha256:<digest>; the digest must be the signed one.
+    AllowedPattern: "^$|^[a-z0-9][a-z0-9._/:-]*@sha256:[0-9a-f]{64}$"
+  GatewayImage:
+    Type: String
+    Default: ""
+    Description: Like ControlPlaneImage, for the egress gateway.
+    AllowedPattern: "^$|^[a-z0-9][a-z0-9._/:-]*@sha256:[0-9a-f]{64}$"
+  ReleaseBucketPrefix:
+    Type: String
+    Default: weft-sandboxes-releases
+    Description: Release artifacts are read from s3://<prefix>-<region>/v<version>/. Change only when mirroring releases to your own buckets.
+    AllowedPattern: "^[a-z0-9][a-z0-9.-]{1,40}[a-z0-9]$"
+
+Rules:
+  CertificateSource:
+    Assertions:
+      - Assert: !Or [!Not [!Equals [!Ref CertificateArn, ""]], !Not [!Equals [!Ref PublicHostedZoneId, ""]]]
+        AssertDescription: Give PublicHostedZoneId (the stack creates the certificate) or CertificateArn.
+  LicenseKeyRequired:
+    RuleCondition: !Equals [!Ref LicenseMode, key]
+    Assertions:
+      - Assert: !Not [!Equals [!Ref LicenseKey, ""]]
+        AssertDescription: LicenseKey is required with LicenseMode=key.
+  MarketplaceSkuRequired:
+    RuleCondition: !Equals [!Ref LicenseMode, marketplace]
+    Assertions:
+      - Assert: !Not [!Equals [!Ref MarketplaceProductSku, ""]]
+        AssertDescription: MarketplaceProductSku is required with LicenseMode=marketplace.
+  ExistingVpcNeedsPrivateSubnets:
+    RuleCondition: !Not [!Equals [!Ref VpcId, ""]]
+    Assertions:
+      - Assert: !Not [{ "Fn::EachMemberIn": [!Ref PrivateSubnetIds, [""]] }]
+        AssertDescription: With VpcId, PrivateSubnetIds must list at least two private subnets.
+  PublicLoadBalancerNeedsAllowlist:
+    RuleCondition: !Equals [!Ref LoadBalancerScheme, internet-facing]
+    Assertions:
+      - Assert: !Not [!Equals [!Ref PublicAllowedCidr, ""]]
+        AssertDescription: An internet-facing load balancer requires PublicAllowedCidr.
+      - Assert: !Not [!Equals [!Ref PublicAllowedCidr, 0.0.0.0/0]]
+        AssertDescription: PublicAllowedCidr must not be 0.0.0.0/0.
+  PublicLoadBalancerInExistingVpcNeedsPublicSubnets:
+    RuleCondition: !And [!Equals [!Ref LoadBalancerScheme, internet-facing], !Not [!Equals [!Ref VpcId, ""]]]
+    Assertions:
+      - Assert: !Not [{ "Fn::EachMemberIn": [!Ref PublicSubnetIds, [""]] }]
+        AssertDescription: With VpcId and an internet-facing load balancer, PublicSubnetIds is required.
+  InterfaceEndpointsOnlyInNewVpc:
+    RuleCondition: !Equals [!Ref CreateInterfaceEndpoints, "true"]
+    Assertions:
+      - Assert: !Equals [!Ref VpcId, ""]
+        AssertDescription: >-
+          CreateInterfaceEndpoints only applies to a VPC the stack creates; an existing VPC
+          usually has its own endpoints, and duplicates with private DNS would conflict.
+  HostsWithoutInternetNeedEndpoints:
+    RuleCondition: !And [!Equals [!Ref HostInternetAccess, disabled], !Equals [!Ref VpcId, ""]]
+    Assertions:
+      - Assert: !Equals [!Ref CreateInterfaceEndpoints, "true"]
+        AssertDescription: HostInternetAccess=disabled needs CreateInterfaceEndpoints=true so hosts can reach SSM, CloudWatch Logs and ECR.
+  # Rewritten by the release workflow with the Regions that have a release AMI.
+  # BEGIN RELEASE REGIONS
+  SupportedRegion:
+    RuleCondition: !Equals [!Ref HostAmiId, ""]
+    Assertions:
+      - Assert: !Contains [["us-east-1"], !Ref "AWS::Region"]
+        AssertDescription: This release has no host AMI in this Region.
+  # END RELEASE REGIONS
+
+Mappings:
+  # Rewritten by the release workflow. The verify-release custom resource checks
+  # every value here against the signed release manifest.
+  Release:
+    Version:
+      Value: "0.0.0-dev"
+    Images:
+      ControlPlane: ghcr.io/weftsh/sandbox-control-plane@sha256:0000000000000000000000000000000000000000000000000000000000000000
+      Gateway: ghcr.io/weftsh/sandbox-egress-gateway@sha256:0000000000000000000000000000000000000000000000000000000000000000
+  # BEGIN RELEASE AMIS
+  HostAmi:
+    us-east-1:
+      ImageId: ami-00000000000000000
+  # END RELEASE AMIS
+  TaskSize:
+    small:
+      Cpu: "512"
+      Memory: "1024"
+      WorkerCpu: "512"
+      WorkerMemory: "1024"
+    medium:
+      Cpu: "1024"
+      Memory: "2048"
+      WorkerCpu: "512"
+      WorkerMemory: "1024"
+    large:
+      Cpu: "2048"
+      Memory: "4096"
+      WorkerCpu: "1024"
+      WorkerMemory: "2048"
+
+Conditions:
+  CreateVpc: !Equals [!Ref VpcId, ""]
+  TwoNatGateways: !And [!Condition CreateVpc, !Equals [!Ref NatGatewayCount, "2"]]
+  CreateEndpoints: !And [!Condition CreateVpc, !Equals [!Ref CreateInterfaceEndpoints, "true"]]
+  CreateCertificate: !Equals [!Ref CertificateArn, ""]
+  HasPublicZone: !Not [!Equals [!Ref PublicHostedZoneId, ""]]
+  PublicLoadBalancer: !Equals [!Ref LoadBalancerScheme, internet-facing]
+  CreatePublicDns: !And [!Condition PublicLoadBalancer, !Condition HasPublicZone]
+  HasClientCidr: !Not [!Equals [!Ref ClientCidr, ""]]
+  NestedVirtualization: !Equals [!Ref HostVirtualization, nested]
+  HasAlt1: !Not [!Equals [!Ref HostInstanceTypeAlt1, ""]]
+  HasAlt2: !Not [!Equals [!Ref HostInstanceTypeAlt2, ""]]
+  HasAmiOverride: !Not [!Equals [!Ref HostAmiId, ""]]
+  HasControlPlaneImageOverride: !Not [!Equals [!Ref ControlPlaneImage, ""]]
+  HasGatewayImageOverride: !Not [!Equals [!Ref GatewayImage, ""]]
+  HasImageOverride: !Or [!Condition HasControlPlaneImageOverride, !Condition HasGatewayImageOverride]
+  LicenseKeyMode: !Equals [!Ref LicenseMode, key]
+  MarketplaceMode: !Equals [!Ref LicenseMode, marketplace]
+  EnableFlowLogs: !Equals [!Ref EnableVpcFlowLogs, "true"]
+  HostHttpsToInternet: !Equals [!Ref HostInternetAccess, enabled]
+  HasAccessLogs: !Not [!Equals [!Ref AccessLogsBucketName, ""]]
+  HasPermissionsBoundary: !Not [!Equals [!Ref PermissionsBoundaryArn, ""]]
+  HasHostEbsKey: !Not [!Equals [!Ref HostEbsKmsKeyArn, ""]]
+
+Resources:
+  # =========================================================================
+  # 1. Encryption key and log groups
+  # =========================================================================
+
+  # One customer managed key encrypts DynamoDB, S3, Secrets Manager, CloudWatch
+  # Logs and ECR. CloudFormation never deletes it on its own
+  # (RetainExceptOnCreate): the Cleanup custom resource schedules its deletion
+  # after the buckets are gone, unless RetainBucketsOnDelete=true, in which
+  # case it stays so the retained data remains readable.
+  DataKey:
+    Type: AWS::KMS::Key
+    DeletionPolicy: RetainExceptOnCreate
+    UpdateReplacePolicy: Retain
+    Properties:
+      Description: !Sub "Weft Sandboxes (${AWS::StackName}): DynamoDB, S3, Secrets Manager, CloudWatch Logs and ECR encryption"
+      EnableKeyRotation: true
+      PendingWindowInDays: 7
+      KeyPolicy:
+        Version: "2012-10-17"
+        Statement:
+          # Standard default key policy statement: key administration and use
+          # are governed by IAM policies in this account. Every role this stack
+          # creates is granted only the key operations it needs, through the
+          # specific AWS service (kms:ViaService).
+          - Sid: DelegateToAccountIam
+            Effect: Allow
+            Principal:
+              AWS: !Sub "arn:${AWS::Partition}:iam::${AWS::AccountId}:root"
+            Action: "kms:*"
+            Resource: "*"
+          # CloudWatch Logs encrypts this account's log groups with the key.
+          # Scoped to log groups in this account and Region.
+          - Sid: AllowCloudWatchLogs
+            Effect: Allow
+            Principal:
+              Service: !Sub "logs.${AWS::Region}.${AWS::URLSuffix}"
+            Action:
+              - kms:Encrypt
+              - kms:Decrypt
+              - kms:ReEncrypt*
+              - kms:GenerateDataKey*
+              - kms:DescribeKey
+            Resource: "*"
+            Condition:
+              ArnLike:
+                kms:EncryptionContext:aws:logs:arn: !Sub "arn:${AWS::Partition}:logs:${AWS::Region}:${AWS::AccountId}:log-group:*"
+      Tags:
+        - Key: weft:stack
+          Value: !Ref AWS::StackName
+
+  DataKeyAlias:
+    Type: AWS::KMS::Alias
+    Properties:
+      AliasName: !Sub "alias/weft/${AWS::StackName}"
+      TargetKeyId: !Ref DataKey
+
+  ControlPlaneLogGroup:
+    Type: AWS::Logs::LogGroup
+    DeletionPolicy: Delete # removed with the stack (clean uninstall)
+    UpdateReplacePolicy: Delete
+    Properties:
+      LogGroupName: !Sub "/weft/${AWS::StackName}/control-plane"
+      KmsKeyId: !GetAtt DataKey.Arn
+      RetentionInDays: !Ref LogRetentionDays
+
+  # Includes the egress audit log (every sandbox connection and decision).
+  GatewayLogGroup:
+    Type: AWS::Logs::LogGroup
+    DeletionPolicy: Delete # removed with the stack (clean uninstall)
+    UpdateReplacePolicy: Delete
+    Properties:
+      LogGroupName: !Sub "/weft/${AWS::StackName}/egress-gateway"
+      KmsKeyId: !GetAtt DataKey.Arn
+      RetentionInDays: !Ref LogRetentionDays
+
+  HostLogGroup:
+    Type: AWS::Logs::LogGroup
+    DeletionPolicy: Delete # removed with the stack (clean uninstall)
+    UpdateReplacePolicy: Delete
+    Properties:
+      LogGroupName: !Sub "/weft/${AWS::StackName}/hosts"
+      KmsKeyId: !GetAtt DataKey.Arn
+      RetentionInDays: !Ref LogRetentionDays
+
+  VerifyReleaseLogGroup:
+    Type: AWS::Logs::LogGroup
+    DeletionPolicy: Delete # removed with the stack (clean uninstall)
+    UpdateReplacePolicy: Delete
+    Properties:
+      LogGroupName: !Sub "/weft/${AWS::StackName}/functions/verify-release"
+      KmsKeyId: !GetAtt DataKey.Arn
+      RetentionInDays: !Ref LogRetentionDays
+
+  EgressCaLogGroup:
+    Type: AWS::Logs::LogGroup
+    DeletionPolicy: Delete # removed with the stack (clean uninstall)
+    UpdateReplacePolicy: Delete
+    Properties:
+      LogGroupName: !Sub "/weft/${AWS::StackName}/functions/egress-ca"
+      KmsKeyId: !GetAtt DataKey.Arn
+      RetentionInDays: !Ref LogRetentionDays
+
+  CleanupLogGroup:
+    Type: AWS::Logs::LogGroup
+    DeletionPolicy: Delete # removed with the stack (clean uninstall)
+    UpdateReplacePolicy: Delete
+    Properties:
+      LogGroupName: !Sub "/weft/${AWS::StackName}/functions/cleanup"
+      KmsKeyId: !GetAtt DataKey.Arn
+      RetentionInDays: !Ref LogRetentionDays
+
+  # =========================================================================
+  # 2. Custom resources (Lambda functions from the signed release)
+  # =========================================================================
+
+  VerifyReleaseRole:
+    Type: AWS::IAM::Role
+    Properties:
+      Description: verify-release custom resource
+      PermissionsBoundary: !If [HasPermissionsBoundary, !Ref PermissionsBoundaryArn, !Ref AWS::NoValue]
+      AssumeRolePolicyDocument:
+        Version: "2012-10-17"
+        Statement:
+          - Effect: Allow
+            Principal: { Service: lambda.amazonaws.com }
+            Action: sts:AssumeRole
+            Condition:
+              StringEquals: { "aws:SourceAccount": !Ref AWS::AccountId }
+      Policies:
+        - PolicyName: verify-release
+          PolicyDocument:
+            Version: "2012-10-17"
+            Statement:
+              # Write its own logs, and nothing else in CloudWatch Logs.
+              - Sid: OwnLogs
+                Effect: Allow
+                Action: [logs:CreateLogStream, logs:PutLogEvents]
+                Resource: !GetAtt VerifyReleaseLogGroup.Arn
+              # Read the signed manifest and its Sigstore bundle for this release only.
+              - Sid: ReadReleaseManifest
+                Effect: Allow
+                Action: s3:GetObject
+                Resource: !Sub
+                  - "arn:${AWS::Partition}:s3:::${ReleaseBucketPrefix}-${AWS::Region}/v${Version}/*"
+                  - Version: !FindInMap [Release, Version, Value]
+              # Preflight lookups. EC2 Describe* actions do not support
+              # resource-level permissions, so the resource is "*"; they are
+              # read-only and return metadata only.
+              - Sid: DescribeNetworkAndImages
+                Effect: Allow
+                Action:
+                  - ec2:DescribeImages
+                  - ec2:DescribeInstanceTypes
+                  - ec2:DescribeManagedPrefixLists
+                  - ec2:DescribeSubnets
+                  - ec2:DescribeVpcs
+                  - ec2:DescribeVpcAttribute
+                Resource: "*"
+
+  # Separate policy so the role can name the functions (including this one)
+  # without a circular dependency: read the CodeSha256 of each deployed
+  # function to compare it with the signed manifest.
+  VerifyReleaseCodePolicy:
+    Type: AWS::IAM::RolePolicy
+    Properties:
+      RoleName: !Ref VerifyReleaseRole
+      PolicyName: read-function-code-hashes
+      PolicyDocument:
+        Version: "2012-10-17"
+        Statement:
+          - Sid: ReadFunctionCodeHashes
+            Effect: Allow
+            Action: lambda:GetFunctionConfiguration
+            Resource:
+              - !GetAtt VerifyReleaseFunction.Arn
+              - !GetAtt EgressCaFunction.Arn
+              - !GetAtt CleanupFunction.Arn
+
+  VerifyReleaseFunction:
+    Type: AWS::Lambda::Function
+    Metadata:
+      checkov:
+        skip:
+          - id: CKV_AWS_115
+            comment: Runs only during stack operations; reserved concurrency would fail in new accounts with a low concurrency quota.
+          - id: CKV_AWS_116
+            comment: Synchronous CloudFormation custom resource; failures are reported to CloudFormation, a DLQ would never receive events.
+          - id: CKV_AWS_117
+            comment: Needs no VPC access (reads S3 and EC2/Lambda APIs); keeping it out of the VPC avoids ENI cleanup delays on stack deletion.
+          - id: CKV_AWS_173
+            comment: The function has no environment variables.
+          - id: CKV_AWS_272
+            comment: Code integrity comes from the signed release manifest (SHA-256 of every function zip, compared with CodeSha256 by this function); see deploy/README.md.
+    Properties:
+      Description: Verifies the Sigstore-signed release manifest and checks the network before anything else is created
+      Runtime: nodejs22.x
+      Handler: index.handler
+      Architectures: [x86_64]
+      MemorySize: 512
+      Timeout: 300
+      Role: !GetAtt VerifyReleaseRole.Arn
+      Code:
+        S3Bucket: !Sub "${ReleaseBucketPrefix}-${AWS::Region}"
+        S3Key: !Sub
+          - "v${Version}/functions/verify-release.zip"
+          - Version: !FindInMap [Release, Version, Value]
+      LoggingConfig:
+        LogGroup: !Ref VerifyReleaseLogGroup
+        LogFormat: Text
+
+  ReleaseVerification:
+    Type: Custom::WeftReleaseVerification
+    DependsOn: VerifyReleaseCodePolicy
+    Properties:
+      ServiceToken: !GetAtt VerifyReleaseFunction.Arn
+      ServiceTimeout: 300
+      ReleaseBucket: !Sub "${ReleaseBucketPrefix}-${AWS::Region}"
+      Version: !FindInMap [Release, Version, Value]
+      AmiId: !If [HasAmiOverride, !Ref HostAmiId, !FindInMap [HostAmi, !Ref "AWS::Region", ImageId]]
+      ControlPlaneImage: !If [HasControlPlaneImageOverride, !Ref ControlPlaneImage, !FindInMap [Release, Images, ControlPlane]]
+      GatewayImage: !If [HasGatewayImageOverride, !Ref GatewayImage, !FindInMap [Release, Images, Gateway]]
+      Functions:
+        - Artifact: functions/verify-release.zip
+          Name: !Ref VerifyReleaseFunction
+        - Artifact: functions/egress-ca.zip
+          Name: !Ref EgressCaFunction
+        - Artifact: functions/cleanup.zip
+          Name: !Ref CleanupFunction
+
+  NetworkPreflight:
+    Type: Custom::WeftNetworkPreflight
+    Properties:
+      ServiceToken: !GetAtt VerifyReleaseFunction.Arn
+      ServiceTimeout: 120
+      VpcId: !If [CreateVpc, !Ref Vpc, !Ref VpcId]
+      PrivateSubnetIds: !If [CreateVpc, [!Ref PrivateSubnet1, !Ref PrivateSubnet2], !Ref PrivateSubnetIds]
+      PublicSubnetIds: !If [CreateVpc, [!Ref PublicSubnet1, !Ref PublicSubnet2], !Ref PublicSubnetIds]
+      CheckPublicSubnets: !If [PublicLoadBalancer, "true", "false"]
+      SlotPoolCidr: !Ref SlotPoolCidr
+      MaxSandboxesPerHost: !Ref MaxSandboxesPerHost
+      HostVirtualization: !Ref HostVirtualization
+      InstanceTypes: [!Ref HostInstanceType, !Ref HostInstanceTypeAlt1, !Ref HostInstanceTypeAlt2]
+
+  EgressCaRole:
+    Type: AWS::IAM::Role
+    Properties:
+      Description: egress-ca custom resource (writes the CA secret; cannot read it)
+      PermissionsBoundary: !If [HasPermissionsBoundary, !Ref PermissionsBoundaryArn, !Ref AWS::NoValue]
+      AssumeRolePolicyDocument:
+        Version: "2012-10-17"
+        Statement:
+          - Effect: Allow
+            Principal: { Service: lambda.amazonaws.com }
+            Action: sts:AssumeRole
+            Condition:
+              StringEquals: { "aws:SourceAccount": !Ref AWS::AccountId }
+      Policies:
+        - PolicyName: egress-ca
+          PolicyDocument:
+            Version: "2012-10-17"
+            Statement:
+              - Sid: OwnLogs
+                Effect: Allow
+                Action: [logs:CreateLogStream, logs:PutLogEvents]
+                Resource: !GetAtt EgressCaLogGroup.Arn
+              # Store the generated CA (certificate and key) as the secret's
+              # current value. No GetSecretValue: this role cannot read it back.
+              - Sid: WriteCaSecret
+                Effect: Allow
+                Action: secretsmanager:PutSecretValue
+                Resource: !Ref EgressCaSecret
+              # Secrets Manager encrypts the new secret version with the stack key.
+              - Sid: EncryptCaSecret
+                Effect: Allow
+                Action: [kms:GenerateDataKey, kms:Decrypt]
+                Resource: !GetAtt DataKey.Arn
+                Condition:
+                  StringEquals:
+                    kms:ViaService: !Sub "secretsmanager.${AWS::Region}.${AWS::URLSuffix}"
+              # Publish the public CA certificate for operators and image builders.
+              - Sid: PublishCaCertificate
+                Effect: Allow
+                Action: [ssm:PutParameter, ssm:GetParameter, ssm:DeleteParameter]
+                Resource: !Sub "arn:${AWS::Partition}:ssm:${AWS::Region}:${AWS::AccountId}:parameter/weft/${AWS::StackName}/egress-ca-cert"
+
+  EgressCaFunction:
+    Type: AWS::Lambda::Function
+    Metadata:
+      checkov:
+        skip:
+          - id: CKV_AWS_115
+            comment: Runs only during stack operations; reserved concurrency would fail in new accounts with a low concurrency quota.
+          - id: CKV_AWS_116
+            comment: Synchronous CloudFormation custom resource; failures are reported to CloudFormation.
+          - id: CKV_AWS_117
+            comment: Needs no VPC access (Secrets Manager and SSM APIs only).
+          - id: CKV_AWS_173
+            comment: The function has no environment variables.
+          - id: CKV_AWS_272
+            comment: Code SHA-256 is checked against the signed release manifest by ReleaseVerification before this function is invoked.
+    Properties:
+      Description: Generates the egress interception CA (ECDSA P-256, 10 years) into the CA secret
+      Runtime: nodejs22.x
+      Handler: index.handler
+      Architectures: [x86_64]
+      MemorySize: 256
+      Timeout: 120
+      Role: !GetAtt EgressCaRole.Arn
+      Code:
+        S3Bucket: !Sub "${ReleaseBucketPrefix}-${AWS::Region}"
+        S3Key: !Sub
+          - "v${Version}/functions/egress-ca.zip"
+          - Version: !FindInMap [Release, Version, Value]
+      LoggingConfig:
+        LogGroup: !Ref EgressCaLogGroup
+        LogFormat: Text
+
+  EgressCa:
+    Type: Custom::WeftEgressCa
+    # Only run release code after the release has been verified.
+    DependsOn: ReleaseVerification
+    Properties:
+      ServiceToken: !GetAtt EgressCaFunction.Arn
+      ServiceTimeout: 120
+      SecretArn: !Ref EgressCaSecret
+      CertParameterName: !Sub "/weft/${AWS::StackName}/egress-ca-cert"
+      StackName: !Ref AWS::StackName
+
+  CleanupRole:
+    Type: AWS::IAM::Role
+    Properties:
+      Description: cleanup custom resource (empties and deletes the stack's buckets on stack deletion)
+      PermissionsBoundary: !If [HasPermissionsBoundary, !Ref PermissionsBoundaryArn, !Ref AWS::NoValue]
+      AssumeRolePolicyDocument:
+        Version: "2012-10-17"
+        Statement:
+          - Effect: Allow
+            Principal: { Service: lambda.amazonaws.com }
+            Action: sts:AssumeRole
+            Condition:
+              StringEquals: { "aws:SourceAccount": !Ref AWS::AccountId }
+      Policies:
+        - PolicyName: cleanup
+          PolicyDocument:
+            Version: "2012-10-17"
+            Statement:
+              - Sid: OwnLogs
+                Effect: Allow
+                Action: [logs:CreateLogStream, logs:PutLogEvents]
+                Resource: !GetAtt CleanupLogGroup.Arn
+              # Empty and delete the artifacts bucket, and only that bucket.
+              - Sid: EmptyAndDeleteArtifactsBucket
+                Effect: Allow
+                Action:
+                  - s3:ListBucket
+                  - s3:ListBucketVersions
+                  - s3:ListBucketMultipartUploads
+                  - s3:PutLifecycleConfiguration
+                  - s3:DeleteBucket
+                Resource: !GetAtt ArtifactsBucket.Arn
+              - Sid: DeleteArtifactObjects
+                Effect: Allow
+                Action: [s3:DeleteObject, s3:DeleteObjectVersion, s3:AbortMultipartUpload]
+                Resource: !Sub "${ArtifactsBucket.Arn}/*"
+              # After the bucket is gone, schedule the stack key for deletion
+              # (7-day waiting period, cancellable).
+              - Sid: ScheduleStackKeyDeletion
+                Effect: Allow
+                Action: kms:ScheduleKeyDeletion
+                Resource: !GetAtt DataKey.Arn
+
+  CleanupFunction:
+    Type: AWS::Lambda::Function
+    Metadata:
+      checkov:
+        skip:
+          - id: CKV_AWS_115
+            comment: Runs only during stack operations; reserved concurrency would fail in new accounts with a low concurrency quota.
+          - id: CKV_AWS_116
+            comment: Synchronous CloudFormation custom resource; failures are reported to CloudFormation.
+          - id: CKV_AWS_117
+            comment: Needs no VPC access (S3 and KMS APIs only).
+          - id: CKV_AWS_173
+            comment: The function has no environment variables.
+          - id: CKV_AWS_272
+            comment: Code SHA-256 is checked against the signed release manifest by ReleaseVerification.
+    Properties:
+      Description: On stack deletion, empties and deletes the stack's buckets and schedules its KMS key for deletion
+      Runtime: nodejs22.x
+      Handler: index.handler
+      Architectures: [x86_64]
+      MemorySize: 512
+      Timeout: 900
+      Role: !GetAtt CleanupRole.Arn
+      Code:
+        S3Bucket: !Sub "${ReleaseBucketPrefix}-${AWS::Region}"
+        S3Key: !Sub
+          - "v${Version}/functions/cleanup.zip"
+          - Version: !FindInMap [Release, Version, Value]
+      LoggingConfig:
+        LogGroup: !Ref CleanupLogGroup
+        LogFormat: Text
+
+  # Everything that writes to the bucket (ECS services, hosts) DependsOn this
+  # resource, so on deletion it runs after all writers are gone.
+  Cleanup:
+    Type: Custom::WeftCleanup
+    Properties:
+      ServiceToken: !GetAtt CleanupFunction.Arn
+      ServiceTimeout: 900
+      BucketNames: [!Ref ArtifactsBucket]
+      Retain: !Ref RetainBucketsOnDelete
+      KmsKeyId: !GetAtt DataKey.Arn
+      PendingWindowInDays: "7"
+
+  # =========================================================================
+  # 3. Network
+  # =========================================================================
+
+  Vpc:
+    Type: AWS::EC2::VPC
+    Condition: CreateVpc
+    Properties:
+      CidrBlock: !Ref VpcCidr
+      EnableDnsSupport: true
+      EnableDnsHostnames: true
+      Tags:
+        - Key: Name
+          Value: !Sub "${AWS::StackName}"
+
+  InternetGateway:
+    Type: AWS::EC2::InternetGateway
+    Condition: CreateVpc
+    Properties:
+      Tags:
+        - Key: Name
+          Value: !Sub "${AWS::StackName}"
+
+  InternetGatewayAttachment:
+    Type: AWS::EC2::VPCGatewayAttachment
+    Condition: CreateVpc
+    Properties:
+      VpcId: !Ref Vpc
+      InternetGatewayId: !Ref InternetGateway
+
+  # Public subnets hold only the NAT gateways (and the public load balancer
+  # when LoadBalancerScheme=internet-facing). Nothing gets a public IP.
+  PublicSubnet1:
+    Type: AWS::EC2::Subnet
+    Condition: CreateVpc
+    Properties:
+      VpcId: !Ref Vpc
+      AvailabilityZone: !Select [0, !GetAZs ""]
+      CidrBlock: !Select [0, !Cidr [!Ref VpcCidr, 4, 12]]
+      MapPublicIpOnLaunch: false
+      Tags:
+        - Key: Name
+          Value: !Sub "${AWS::StackName}-public-1"
+
+  PublicSubnet2:
+    Type: AWS::EC2::Subnet
+    Condition: CreateVpc
+    Properties:
+      VpcId: !Ref Vpc
+      AvailabilityZone: !Select [1, !GetAZs ""]
+      CidrBlock: !Select [1, !Cidr [!Ref VpcCidr, 4, 12]]
+      MapPublicIpOnLaunch: false
+      Tags:
+        - Key: Name
+          Value: !Sub "${AWS::StackName}-public-2"
+
+  PrivateSubnet1:
+    Type: AWS::EC2::Subnet
+    Condition: CreateVpc
+    Properties:
+      VpcId: !Ref Vpc
+      AvailabilityZone: !Select [0, !GetAZs ""]
+      CidrBlock: !Select [2, !Cidr [!Ref VpcCidr, 4, 12]]
+      MapPublicIpOnLaunch: false
+      Tags:
+        - Key: Name
+          Value: !Sub "${AWS::StackName}-private-1"
+
+  PrivateSubnet2:
+    Type: AWS::EC2::Subnet
+    Condition: CreateVpc
+    Properties:
+      VpcId: !Ref Vpc
+      AvailabilityZone: !Select [1, !GetAZs ""]
+      CidrBlock: !Select [3, !Cidr [!Ref VpcCidr, 4, 12]]
+      MapPublicIpOnLaunch: false
+      Tags:
+        - Key: Name
+          Value: !Sub "${AWS::StackName}-private-2"
+
+  PublicRouteTable:
+    Type: AWS::EC2::RouteTable
+    Condition: CreateVpc
+    Properties:
+      VpcId: !Ref Vpc
+      Tags:
+        - Key: Name
+          Value: !Sub "${AWS::StackName}-public"
+
+  PublicDefaultRoute:
+    Type: AWS::EC2::Route
+    Condition: CreateVpc
+    DependsOn: InternetGatewayAttachment
+    Properties:
+      RouteTableId: !Ref PublicRouteTable
+      DestinationCidrBlock: 0.0.0.0/0
+      GatewayId: !Ref InternetGateway
+
+  PublicSubnet1Routes:
+    Type: AWS::EC2::SubnetRouteTableAssociation
+    Condition: CreateVpc
+    Properties:
+      SubnetId: !Ref PublicSubnet1
+      RouteTableId: !Ref PublicRouteTable
+
+  PublicSubnet2Routes:
+    Type: AWS::EC2::SubnetRouteTableAssociation
+    Condition: CreateVpc
+    Properties:
+      SubnetId: !Ref PublicSubnet2
+      RouteTableId: !Ref PublicRouteTable
+
+  NatEip1:
+    Type: AWS::EC2::EIP
+    Condition: CreateVpc
+    DependsOn: InternetGatewayAttachment
+    Properties:
+      Domain: vpc
+      Tags:
+        - Key: Name
+          Value: !Sub "${AWS::StackName}-nat-1"
+
+  NatGateway1:
+    Type: AWS::EC2::NatGateway
+    Condition: CreateVpc
+    Properties:
+      AllocationId: !GetAtt NatEip1.AllocationId
+      SubnetId: !Ref PublicSubnet1
+      Tags:
+        - Key: Name
+          Value: !Sub "${AWS::StackName}-1"
+
+  NatEip2:
+    Type: AWS::EC2::EIP
+    Condition: TwoNatGateways
+    DependsOn: InternetGatewayAttachment
+    Properties:
+      Domain: vpc
+      Tags:
+        - Key: Name
+          Value: !Sub "${AWS::StackName}-nat-2"
+
+  NatGateway2:
+    Type: AWS::EC2::NatGateway
+    Condition: TwoNatGateways
+    Properties:
+      AllocationId: !GetAtt NatEip2.AllocationId
+      SubnetId: !Ref PublicSubnet2
+      Tags:
+        - Key: Name
+          Value: !Sub "${AWS::StackName}-2"
+
+  PrivateRouteTable1:
+    Type: AWS::EC2::RouteTable
+    Condition: CreateVpc
+    Properties:
+      VpcId: !Ref Vpc
+      Tags:
+        - Key: Name
+          Value: !Sub "${AWS::StackName}-private-1"
+
+  PrivateDefaultRoute1:
+    Type: AWS::EC2::Route
+    Condition: CreateVpc
+    Properties:
+      RouteTableId: !Ref PrivateRouteTable1
+      DestinationCidrBlock: 0.0.0.0/0
+      NatGatewayId: !Ref NatGateway1
+
+  PrivateSubnet1Routes:
+    Type: AWS::EC2::SubnetRouteTableAssociation
+    Condition: CreateVpc
+    Properties:
+      SubnetId: !Ref PrivateSubnet1
+      RouteTableId: !Ref PrivateRouteTable1
+
+  PrivateRouteTable2:
+    Type: AWS::EC2::RouteTable
+    Condition: CreateVpc
+    Properties:
+      VpcId: !Ref Vpc
+      Tags:
+        - Key: Name
+          Value: !Sub "${AWS::StackName}-private-2"
+
+  PrivateDefaultRoute2:
+    Type: AWS::EC2::Route
+    Condition: CreateVpc
+    Properties:
+      RouteTableId: !Ref PrivateRouteTable2
+      DestinationCidrBlock: 0.0.0.0/0
+      NatGatewayId: !If [TwoNatGateways, !Ref NatGateway2, !Ref NatGateway1]
+
+  PrivateSubnet2Routes:
+    Type: AWS::EC2::SubnetRouteTableAssociation
+    Condition: CreateVpc
+    Properties:
+      SubnetId: !Ref PrivateSubnet2
+      RouteTableId: !Ref PrivateRouteTable2
+
+  # Gateway endpoints are free and keep S3 (artifacts, presigned URLs, ECR
+  # layers) and DynamoDB traffic off the NAT gateway and the internet.
+  S3GatewayEndpoint:
+    Type: AWS::EC2::VPCEndpoint
+    Condition: CreateVpc
+    Properties:
+      VpcId: !Ref Vpc
+      VpcEndpointType: Gateway
+      ServiceName: !Sub "com.amazonaws.${AWS::Region}.s3"
+      RouteTableIds: [!Ref PrivateRouteTable1, !Ref PrivateRouteTable2]
+
+  DynamoDbGatewayEndpoint:
+    Type: AWS::EC2::VPCEndpoint
+    Condition: CreateVpc
+    Properties:
+      VpcId: !Ref Vpc
+      VpcEndpointType: Gateway
+      ServiceName: !Sub "com.amazonaws.${AWS::Region}.dynamodb"
+      RouteTableIds: [!Ref PrivateRouteTable1, !Ref PrivateRouteTable2]
+
+  EndpointSecurityGroup:
+    Type: AWS::EC2::SecurityGroup
+    Condition: CreateEndpoints
+    Properties:
+      GroupDescription: VPC interface endpoints, HTTPS from the VPC only
+      VpcId: !Ref Vpc
+      SecurityGroupIngress:
+        - Description: HTTPS from the VPC
+          IpProtocol: tcp
+          FromPort: 443
+          ToPort: 443
+          CidrIp: !GetAtt NetworkPreflight.VpcCidr
+      # Endpoints never open connections; this placeholder rule replaces the
+      # default allow-all egress rule with one that matches nothing.
+      SecurityGroupEgress:
+        - Description: No outbound traffic
+          IpProtocol: "-1"
+          CidrIp: 127.0.0.1/32
+
+  EcrApiEndpoint:
+    Type: AWS::EC2::VPCEndpoint
+    Condition: CreateEndpoints
+    Properties:
+      VpcId: !Ref Vpc
+      VpcEndpointType: Interface
+      ServiceName: !Sub "com.amazonaws.${AWS::Region}.ecr.api"
+      PrivateDnsEnabled: true
+      SubnetIds: [!Ref PrivateSubnet1, !Ref PrivateSubnet2]
+      SecurityGroupIds: [!Ref EndpointSecurityGroup]
+
+  EcrDkrEndpoint:
+    Type: AWS::EC2::VPCEndpoint
+    Condition: CreateEndpoints
+    Properties:
+      VpcId: !Ref Vpc
+      VpcEndpointType: Interface
+      ServiceName: !Sub "com.amazonaws.${AWS::Region}.ecr.dkr"
+      PrivateDnsEnabled: true
+      SubnetIds: [!Ref PrivateSubnet1, !Ref PrivateSubnet2]
+      SecurityGroupIds: [!Ref EndpointSecurityGroup]
+
+  LogsEndpoint:
+    Type: AWS::EC2::VPCEndpoint
+    Condition: CreateEndpoints
+    Properties:
+      VpcId: !Ref Vpc
+      VpcEndpointType: Interface
+      ServiceName: !Sub "com.amazonaws.${AWS::Region}.logs"
+      PrivateDnsEnabled: true
+      SubnetIds: [!Ref PrivateSubnet1, !Ref PrivateSubnet2]
+      SecurityGroupIds: [!Ref EndpointSecurityGroup]
+
+  MonitoringEndpoint:
+    Type: AWS::EC2::VPCEndpoint
+    Condition: CreateEndpoints
+    Properties:
+      VpcId: !Ref Vpc
+      VpcEndpointType: Interface
+      ServiceName: !Sub "com.amazonaws.${AWS::Region}.monitoring"
+      PrivateDnsEnabled: true
+      SubnetIds: [!Ref PrivateSubnet1, !Ref PrivateSubnet2]
+      SecurityGroupIds: [!Ref EndpointSecurityGroup]
+
+  SecretsManagerEndpoint:
+    Type: AWS::EC2::VPCEndpoint
+    Condition: CreateEndpoints
+    Properties:
+      VpcId: !Ref Vpc
+      VpcEndpointType: Interface
+      ServiceName: !Sub "com.amazonaws.${AWS::Region}.secretsmanager"
+      PrivateDnsEnabled: true
+      SubnetIds: [!Ref PrivateSubnet1, !Ref PrivateSubnet2]
+      SecurityGroupIds: [!Ref EndpointSecurityGroup]
+
+  StsEndpoint:
+    Type: AWS::EC2::VPCEndpoint
+    Condition: CreateEndpoints
+    Properties:
+      VpcId: !Ref Vpc
+      VpcEndpointType: Interface
+      ServiceName: !Sub "com.amazonaws.${AWS::Region}.sts"
+      PrivateDnsEnabled: true
+      SubnetIds: [!Ref PrivateSubnet1, !Ref PrivateSubnet2]
+      SecurityGroupIds: [!Ref EndpointSecurityGroup]
+
+  KmsEndpoint:
+    Type: AWS::EC2::VPCEndpoint
+    Condition: CreateEndpoints
+    Properties:
+      VpcId: !Ref Vpc
+      VpcEndpointType: Interface
+      ServiceName: !Sub "com.amazonaws.${AWS::Region}.kms"
+      PrivateDnsEnabled: true
+      SubnetIds: [!Ref PrivateSubnet1, !Ref PrivateSubnet2]
+      SecurityGroupIds: [!Ref EndpointSecurityGroup]
+
+  SsmEndpoint:
+    Type: AWS::EC2::VPCEndpoint
+    Condition: CreateEndpoints
+    Properties:
+      VpcId: !Ref Vpc
+      VpcEndpointType: Interface
+      ServiceName: !Sub "com.amazonaws.${AWS::Region}.ssm"
+      PrivateDnsEnabled: true
+      SubnetIds: [!Ref PrivateSubnet1, !Ref PrivateSubnet2]
+      SecurityGroupIds: [!Ref EndpointSecurityGroup]
+
+  SsmMessagesEndpoint:
+    Type: AWS::EC2::VPCEndpoint
+    Condition: CreateEndpoints
+    Properties:
+      VpcId: !Ref Vpc
+      VpcEndpointType: Interface
+      ServiceName: !Sub "com.amazonaws.${AWS::Region}.ssmmessages"
+      PrivateDnsEnabled: true
+      SubnetIds: [!Ref PrivateSubnet1, !Ref PrivateSubnet2]
+      SecurityGroupIds: [!Ref EndpointSecurityGroup]
+
+  Ec2MessagesEndpoint:
+    Type: AWS::EC2::VPCEndpoint
+    Condition: CreateEndpoints
+    Properties:
+      VpcId: !Ref Vpc
+      VpcEndpointType: Interface
+      ServiceName: !Sub "com.amazonaws.${AWS::Region}.ec2messages"
+      PrivateDnsEnabled: true
+      SubnetIds: [!Ref PrivateSubnet1, !Ref PrivateSubnet2]
+      SecurityGroupIds: [!Ref EndpointSecurityGroup]
+
+  FlowLogsLogGroup:
+    Type: AWS::Logs::LogGroup
+    Condition: EnableFlowLogs
+    DeletionPolicy: Delete # removed with the stack (clean uninstall)
+    UpdateReplacePolicy: Delete
+    Properties:
+      LogGroupName: !Sub "/weft/${AWS::StackName}/vpc-flow-logs"
+      KmsKeyId: !GetAtt DataKey.Arn
+      RetentionInDays: !Ref LogRetentionDays
+
+  FlowLogsRole:
+    Type: AWS::IAM::Role
+    Condition: EnableFlowLogs
+    Properties:
+      Description: VPC flow logs delivery to CloudWatch Logs
+      PermissionsBoundary: !If [HasPermissionsBoundary, !Ref PermissionsBoundaryArn, !Ref AWS::NoValue]
+      AssumeRolePolicyDocument:
+        Version: "2012-10-17"
+        Statement:
+          - Effect: Allow
+            Principal: { Service: vpc-flow-logs.amazonaws.com }
+            Action: sts:AssumeRole
+            # Confused-deputy protection: only flow logs in this account.
+            Condition:
+              StringEquals: { "aws:SourceAccount": !Ref AWS::AccountId }
+              ArnLike: { "aws:SourceArn": !Sub "arn:${AWS::Partition}:ec2:${AWS::Region}:${AWS::AccountId}:vpc-flow-log/*" }
+      Policies:
+        - PolicyName: deliver-flow-logs
+          PolicyDocument:
+            Version: "2012-10-17"
+            Statement:
+              # Write flow log records to the stack's flow log group only.
+              - Sid: WriteFlowLogs
+                Effect: Allow
+                Action: [logs:CreateLogStream, logs:PutLogEvents, logs:DescribeLogStreams]
+                Resource: !GetAtt FlowLogsLogGroup.Arn
+
+  FlowLog:
+    Type: AWS::EC2::FlowLog
+    Condition: EnableFlowLogs
+    Properties:
+      ResourceType: VPC
+      ResourceId: !If [CreateVpc, !Ref Vpc, !Ref VpcId]
+      TrafficType: ALL
+      LogDestinationType: cloud-watch-logs
+      LogGroupName: !Ref FlowLogsLogGroup
+      DeliverLogsPermissionArn: !GetAtt FlowLogsRole.Arn
+      MaxAggregationInterval: 60
+
+  # --- Security groups -----------------------------------------------------
+  # Cross-references between groups are separate ingress/egress resources to
+  # avoid dependency cycles. Every group declares at least one inline egress
+  # rule, which removes the default allow-all egress rule.
+
+  LoadBalancerSecurityGroup:
+    Type: AWS::EC2::SecurityGroup
+    Properties:
+      GroupDescription: Internal load balancer, HTTPS from clients, hosts and the egress gateway
+      VpcId: !If [CreateVpc, !Ref Vpc, !Ref VpcId]
+      SecurityGroupIngress:
+        - Description: HTTPS from clients (ClientCidr, default the VPC CIDR)
+          IpProtocol: tcp
+          FromPort: 443
+          ToPort: 443
+          CidrIp: !If [HasClientCidr, !Ref ClientCidr, !GetAtt NetworkPreflight.VpcCidr]
+      SecurityGroupEgress:
+        - Description: API tasks
+          IpProtocol: tcp
+          FromPort: 3000
+          ToPort: 3000
+          DestinationSecurityGroupId: !Ref ApiSecurityGroup
+        - Description: Edge proxy tasks
+          IpProtocol: tcp
+          FromPort: 3001
+          ToPort: 3001
+          DestinationSecurityGroupId: !Ref EdgeSecurityGroup
+
+  PublicLoadBalancerSecurityGroup:
+    Type: AWS::EC2::SecurityGroup
+    Condition: PublicLoadBalancer
+    Metadata:
+      cfn-lint:
+        config:
+          ignore_checks:
+            - W1030 # PublicAllowedCidr is empty only when this resource is not created (PublicLoadBalancerNeedsAllowlist rule).
+    Properties:
+      GroupDescription: Public load balancer (evaluation), HTTPS from PublicAllowedCidr only
+      VpcId: !If [CreateVpc, !Ref Vpc, !Ref VpcId]
+      SecurityGroupIngress:
+        - Description: HTTPS from the evaluation allowlist
+          IpProtocol: tcp
+          FromPort: 443
+          ToPort: 443
+          CidrIp: !Ref PublicAllowedCidr
+      SecurityGroupEgress:
+        - Description: API tasks
+          IpProtocol: tcp
+          FromPort: 3000
+          ToPort: 3000
+          DestinationSecurityGroupId: !Ref ApiSecurityGroup
+        - Description: Edge proxy tasks
+          IpProtocol: tcp
+          FromPort: 3001
+          ToPort: 3001
+          DestinationSecurityGroupId: !Ref EdgeSecurityGroup
+
+  ApiSecurityGroup:
+    Type: AWS::EC2::SecurityGroup
+    Properties:
+      GroupDescription: Control plane API tasks
+      VpcId: !If [CreateVpc, !Ref Vpc, !Ref VpcId]
+      SecurityGroupEgress:
+        - Description: AWS APIs (DynamoDB, S3, STS, ECR, Secrets Manager, CloudWatch), image pulls and the license check, through endpoints or NAT
+          IpProtocol: tcp
+          FromPort: 443
+          ToPort: 443
+          CidrIp: 0.0.0.0/0
+        - Description: Host agent API and data-path tunnel
+          IpProtocol: tcp
+          FromPort: 5007
+          ToPort: 5008
+          DestinationSecurityGroupId: !Ref HostSecurityGroup
+
+  EdgeSecurityGroup:
+    Type: AWS::EC2::SecurityGroup
+    Properties:
+      GroupDescription: Control plane edge proxy tasks
+      VpcId: !If [CreateVpc, !Ref Vpc, !Ref VpcId]
+      SecurityGroupEgress:
+        - Description: AWS APIs (DynamoDB, Secrets Manager, CloudWatch Logs) and image pulls, through endpoints or NAT
+          IpProtocol: tcp
+          FromPort: 443
+          ToPort: 443
+          CidrIp: 0.0.0.0/0
+        - Description: Host agent API and data-path tunnel
+          IpProtocol: tcp
+          FromPort: 5007
+          ToPort: 5008
+          DestinationSecurityGroupId: !Ref HostSecurityGroup
+
+  # The worker has no listener and receives no inbound traffic.
+  WorkerSecurityGroup:
+    Type: AWS::EC2::SecurityGroup
+    Properties:
+      GroupDescription: Control plane worker task (no inbound)
+      VpcId: !If [CreateVpc, !Ref Vpc, !Ref VpcId]
+      SecurityGroupEgress:
+        - Description: AWS APIs (DynamoDB, S3, CloudWatch, ECR), image pulls and the license check, through endpoints or NAT
+          IpProtocol: tcp
+          FromPort: 443
+          ToPort: 443
+          CidrIp: 0.0.0.0/0
+        - Description: Host agent API (stopping expired sandboxes)
+          IpProtocol: tcp
+          FromPort: 5007
+          ToPort: 5007
+          DestinationSecurityGroupId: !Ref HostSecurityGroup
+
+  GatewaySecurityGroup:
+    Type: AWS::EC2::SecurityGroup
+    Metadata:
+      checkov:
+        skip:
+          - id: CKV_AWS_382
+            comment: >-
+              The egress gateway is the policy enforcement point for sandbox traffic: it
+              connects only to destinations a sandbox's allowlist permits, on any TCP port
+              the allowlist names, and never to link-local or metadata addresses. The
+              security group therefore cannot narrow destinations further.
+    Properties:
+      GroupDescription: Egress gateway tasks, PROXY protocol from hosts only
+      VpcId: !If [CreateVpc, !Ref Vpc, !Ref VpcId]
+      SecurityGroupEgress:
+        - Description: Allowlisted sandbox destinations, the control plane and AWS APIs (TCP only)
+          IpProtocol: tcp
+          FromPort: 1
+          ToPort: 65535
+          CidrIp: 0.0.0.0/0
+
+  HostSecurityGroup:
+    Type: AWS::EC2::SecurityGroup
+    Properties:
+      GroupDescription: Sandbox hosts, host agent ports from the control plane only
+      VpcId: !If [CreateVpc, !Ref Vpc, !Ref VpcId]
+      SecurityGroupEgress:
+        - Description: Sandbox connections to the egress gateway (PROXY protocol)
+          IpProtocol: tcp
+          FromPort: 15000
+          ToPort: 15000
+          DestinationSecurityGroupId: !Ref GatewaySecurityGroup
+        - Description: DNS to the VPC resolver
+          IpProtocol: udp
+          FromPort: 53
+          ToPort: 53
+          CidrIp: !GetAtt NetworkPreflight.VpcCidr
+        - Description: DNS to the VPC resolver
+          IpProtocol: tcp
+          FromPort: 53
+          ToPort: 53
+          CidrIp: !GetAtt NetworkPreflight.VpcCidr
+        - Description: S3 (presigned artifact URLs and ECR layers) through the S3 gateway endpoint
+          IpProtocol: tcp
+          FromPort: 443
+          ToPort: 443
+          DestinationPrefixListId: !GetAtt NetworkPreflight.S3PrefixListId
+        - Description: VPC interface endpoints (SSM, CloudWatch Logs, ECR)
+          IpProtocol: tcp
+          FromPort: 443
+          ToPort: 443
+          CidrIp: !GetAtt NetworkPreflight.VpcCidr
+
+  ApiIngressFromLoadBalancer:
+    Type: AWS::EC2::SecurityGroupIngress
+    Properties:
+      GroupId: !Ref ApiSecurityGroup
+      Description: HTTP from the internal load balancer
+      IpProtocol: tcp
+      FromPort: 3000
+      ToPort: 3000
+      SourceSecurityGroupId: !Ref LoadBalancerSecurityGroup
+
+  ApiIngressFromPublicLoadBalancer:
+    Type: AWS::EC2::SecurityGroupIngress
+    Condition: PublicLoadBalancer
+    Properties:
+      GroupId: !Ref ApiSecurityGroup
+      Description: HTTP from the public load balancer
+      IpProtocol: tcp
+      FromPort: 3000
+      ToPort: 3000
+      SourceSecurityGroupId: !Ref PublicLoadBalancerSecurityGroup
+
+  EdgeIngressFromLoadBalancer:
+    Type: AWS::EC2::SecurityGroupIngress
+    Properties:
+      GroupId: !Ref EdgeSecurityGroup
+      Description: HTTP from the internal load balancer
+      IpProtocol: tcp
+      FromPort: 3001
+      ToPort: 3001
+      SourceSecurityGroupId: !Ref LoadBalancerSecurityGroup
+
+  EdgeIngressFromPublicLoadBalancer:
+    Type: AWS::EC2::SecurityGroupIngress
+    Condition: PublicLoadBalancer
+    Properties:
+      GroupId: !Ref EdgeSecurityGroup
+      Description: HTTP from the public load balancer
+      IpProtocol: tcp
+      FromPort: 3001
+      ToPort: 3001
+      SourceSecurityGroupId: !Ref PublicLoadBalancerSecurityGroup
+
+  HostIngressFromApi:
+    Type: AWS::EC2::SecurityGroupIngress
+    Properties:
+      GroupId: !Ref HostSecurityGroup
+      Description: Host agent API (5007) and tunnel (5008) from API tasks
+      IpProtocol: tcp
+      FromPort: 5007
+      ToPort: 5008
+      SourceSecurityGroupId: !Ref ApiSecurityGroup
+
+  HostIngressFromEdge:
+    Type: AWS::EC2::SecurityGroupIngress
+    Properties:
+      GroupId: !Ref HostSecurityGroup
+      Description: Host agent API (5007) and tunnel (5008) from edge proxy tasks
+      IpProtocol: tcp
+      FromPort: 5007
+      ToPort: 5008
+      SourceSecurityGroupId: !Ref EdgeSecurityGroup
+
+  HostIngressFromWorker:
+    Type: AWS::EC2::SecurityGroupIngress
+    Properties:
+      GroupId: !Ref HostSecurityGroup
+      Description: Host agent API (5007) from the worker, which stops expired sandboxes
+      IpProtocol: tcp
+      FromPort: 5007
+      ToPort: 5007
+      SourceSecurityGroupId: !Ref WorkerSecurityGroup
+
+  # Only with HostInternetAccess=enabled: template builds pull images from
+  # public registries (Docker Hub, GHCR, ...) through NAT. Sandbox traffic
+  # never uses this path; it is always redirected to the egress gateway.
+  HostEgressToInternet:
+    Type: AWS::EC2::SecurityGroupEgress
+    Condition: HostHttpsToInternet
+    Properties:
+      GroupId: !Ref HostSecurityGroup
+      Description: HTTPS to public registries and AWS APIs through NAT (HostInternetAccess=enabled)
+      IpProtocol: tcp
+      FromPort: 443
+      ToPort: 443
+      CidrIp: 0.0.0.0/0
+
+  HostEgressToLoadBalancer:
+    Type: AWS::EC2::SecurityGroupEgress
+    Properties:
+      GroupId: !Ref HostSecurityGroup
+      Description: Control plane API (https://api.<domain>) through the internal load balancer
+      IpProtocol: tcp
+      FromPort: 443
+      ToPort: 443
+      DestinationSecurityGroupId: !Ref LoadBalancerSecurityGroup
+
+  LoadBalancerIngressFromHosts:
+    Type: AWS::EC2::SecurityGroupIngress
+    Properties:
+      GroupId: !Ref LoadBalancerSecurityGroup
+      Description: Host agent registration and heartbeats
+      IpProtocol: tcp
+      FromPort: 443
+      ToPort: 443
+      SourceSecurityGroupId: !Ref HostSecurityGroup
+
+  LoadBalancerIngressFromGateway:
+    Type: AWS::EC2::SecurityGroupIngress
+    Properties:
+      GroupId: !Ref LoadBalancerSecurityGroup
+      Description: Egress gateway policy and credential lookups
+      IpProtocol: tcp
+      FromPort: 443
+      ToPort: 443
+      SourceSecurityGroupId: !Ref GatewaySecurityGroup
+
+  GatewayIngressFromHosts:
+    Type: AWS::EC2::SecurityGroupIngress
+    Properties:
+      GroupId: !Ref GatewaySecurityGroup
+      Description: Sandbox connections from hosts (PROXY protocol v2); the gateway checks the source is the sandbox's host
+      IpProtocol: tcp
+      FromPort: 15000
+      ToPort: 15000
+      SourceSecurityGroupId: !Ref HostSecurityGroup
+
+  # =========================================================================
+  # 4. Data
+  # =========================================================================
+
+  # Template artifacts (templates/) and paused-sandbox snapshots (snapshots/).
+  # Hosts never get S3 permissions: they use presigned URLs from the control
+  # plane. Deleted by the Cleanup custom resource unless RetainBucketsOnDelete.
+  ArtifactsBucket:
+    Type: AWS::S3::Bucket
+    DeletionPolicy: RetainExceptOnCreate
+    UpdateReplacePolicy: Retain
+    Metadata:
+      checkov:
+        skip:
+          - id: CKV_AWS_18
+            comment: Server access logging is enabled when AccessLogsBucketName is set (the target must be an SSE-S3 bucket, typically the organization's log archive).
+      cfn-lint:
+        config:
+          ignore_checks:
+            - W3045 # Access logging uses the modern bucket-owner-enforced model; see AccessLogsBucketName.
+    Properties:
+      BucketEncryption:
+        ServerSideEncryptionConfiguration:
+          - ServerSideEncryptionByDefault:
+              SSEAlgorithm: aws:kms
+              KMSMasterKeyID: !GetAtt DataKey.Arn
+            BucketKeyEnabled: true
+      PublicAccessBlockConfiguration:
+        BlockPublicAcls: true
+        BlockPublicPolicy: true
+        IgnorePublicAcls: true
+        RestrictPublicBuckets: true
+      OwnershipControls:
+        Rules:
+          - ObjectOwnership: BucketOwnerEnforced
+      VersioningConfiguration:
+        Status: Enabled
+      LifecycleConfiguration:
+        Rules:
+          - Id: abort-incomplete-multipart-uploads
+            Status: Enabled
+            AbortIncompleteMultipartUpload:
+              DaysAfterInitiation: 1
+          - Id: expire-noncurrent-versions
+            Status: Enabled
+            NoncurrentVersionExpiration:
+              NoncurrentDays: 7
+            ExpiredObjectDeleteMarker: true
+      LoggingConfiguration: !If
+        - HasAccessLogs
+        - DestinationBucketName: !Ref AccessLogsBucketName
+          LogFilePrefix: !Sub "s3/${AWS::StackName}/artifacts/"
+        - !Ref AWS::NoValue
+      Tags:
+        - Key: weft:stack
+          Value: !Ref AWS::StackName
+
+  ArtifactsBucketPolicy:
+    Type: AWS::S3::BucketPolicy
+    Properties:
+      Bucket: !Ref ArtifactsBucket
+      PolicyDocument:
+        Version: "2012-10-17"
+        Statement:
+          # TLS only, including presigned URLs used by hosts.
+          - Sid: DenyInsecureTransport
+            Effect: Deny
+            Principal: "*"
+            Action: "s3:*"
+            Resource: [!GetAtt ArtifactsBucket.Arn, !Sub "${ArtifactsBucket.Arn}/*"]
+            Condition:
+              Bool: { "aws:SecureTransport": "false" }
+          - Sid: DenyOldTls
+            Effect: Deny
+            Principal: "*"
+            Action: "s3:*"
+            Resource: [!GetAtt ArtifactsBucket.Arn, !Sub "${ArtifactsBucket.Arn}/*"]
+            Condition:
+              NumericLessThan: { "s3:TlsVersion": "1.2" }
+
+  # DynamoDB tables: on-demand, encrypted with the stack key, point-in-time
+  # recovery on. Names are <stack>-<record>, matching WEFT_TABLE_PREFIX.
+  # Deleted with the stack.
+  TeamsTable:
+    Type: AWS::DynamoDB::Table
+    DeletionPolicy: Delete
+    UpdateReplacePolicy: Retain
+    Properties:
+      TableName: !Sub "${AWS::StackName}-teams"
+      BillingMode: PAY_PER_REQUEST
+      AttributeDefinitions: [{ AttributeName: teamId, AttributeType: S }]
+      KeySchema: [{ AttributeName: teamId, KeyType: HASH }]
+      SSESpecification: { SSEEnabled: true, SSEType: KMS, KMSMasterKeyId: !Ref DataKey }
+      PointInTimeRecoverySpecification: { PointInTimeRecoveryEnabled: true }
+
+  ApiKeysTable:
+    Type: AWS::DynamoDB::Table
+    DeletionPolicy: Delete
+    UpdateReplacePolicy: Retain
+    Properties:
+      TableName: !Sub "${AWS::StackName}-apikeys"
+      BillingMode: PAY_PER_REQUEST
+      AttributeDefinitions: [{ AttributeName: keyHash, AttributeType: S }]
+      KeySchema: [{ AttributeName: keyHash, KeyType: HASH }]
+      SSESpecification: { SSEEnabled: true, SSEType: KMS, KMSMasterKeyId: !Ref DataKey }
+      PointInTimeRecoverySpecification: { PointInTimeRecoveryEnabled: true }
+
+  TemplatesTable:
+    Type: AWS::DynamoDB::Table
+    DeletionPolicy: Delete
+    UpdateReplacePolicy: Retain
+    Properties:
+      TableName: !Sub "${AWS::StackName}-templates"
+      BillingMode: PAY_PER_REQUEST
+      AttributeDefinitions: [{ AttributeName: templateId, AttributeType: S }]
+      KeySchema: [{ AttributeName: templateId, KeyType: HASH }]
+      SSESpecification: { SSEEnabled: true, SSEType: KMS, KMSMasterKeyId: !Ref DataKey }
+      PointInTimeRecoverySpecification: { PointInTimeRecoveryEnabled: true }
+
+  BuildsTable:
+    Type: AWS::DynamoDB::Table
+    DeletionPolicy: Delete
+    UpdateReplacePolicy: Retain
+    Properties:
+      TableName: !Sub "${AWS::StackName}-builds"
+      BillingMode: PAY_PER_REQUEST
+      AttributeDefinitions: [{ AttributeName: buildId, AttributeType: S }]
+      KeySchema: [{ AttributeName: buildId, KeyType: HASH }]
+      SSESpecification: { SSEEnabled: true, SSEType: KMS, KMSMasterKeyId: !Ref DataKey }
+      PointInTimeRecoverySpecification: { PointInTimeRecoveryEnabled: true }
+
+  SandboxesTable:
+    Type: AWS::DynamoDB::Table
+    DeletionPolicy: Delete
+    UpdateReplacePolicy: Retain
+    Properties:
+      TableName: !Sub "${AWS::StackName}-sandboxes"
+      BillingMode: PAY_PER_REQUEST
+      AttributeDefinitions:
+        - { AttributeName: sandboxId, AttributeType: S }
+        - { AttributeName: teamId, AttributeType: S }
+      KeySchema: [{ AttributeName: sandboxId, KeyType: HASH }]
+      GlobalSecondaryIndexes:
+        - IndexName: teamId-index
+          KeySchema: [{ AttributeName: teamId, KeyType: HASH }]
+          Projection: { ProjectionType: ALL }
+      SSESpecification: { SSEEnabled: true, SSEType: KMS, KMSMasterKeyId: !Ref DataKey }
+      PointInTimeRecoverySpecification: { PointInTimeRecoveryEnabled: true }
+
+  HostsTable:
+    Type: AWS::DynamoDB::Table
+    DeletionPolicy: Delete
+    UpdateReplacePolicy: Retain
+    Properties:
+      TableName: !Sub "${AWS::StackName}-hosts"
+      BillingMode: PAY_PER_REQUEST
+      AttributeDefinitions: [{ AttributeName: hostId, AttributeType: S }]
+      KeySchema: [{ AttributeName: hostId, KeyType: HASH }]
+      SSESpecification: { SSEEnabled: true, SSEType: KMS, KMSMasterKeyId: !Ref DataKey }
+      PointInTimeRecoverySpecification: { PointInTimeRecoveryEnabled: true }
+
+  MetaTable:
+    Type: AWS::DynamoDB::Table
+    DeletionPolicy: Delete
+    UpdateReplacePolicy: Retain
+    Properties:
+      TableName: !Sub "${AWS::StackName}-meta"
+      BillingMode: PAY_PER_REQUEST
+      AttributeDefinitions: [{ AttributeName: key, AttributeType: S }]
+      KeySchema: [{ AttributeName: key, KeyType: HASH }]
+      SSESpecification: { SSEEnabled: true, SSEType: KMS, KMSMasterKeyId: !Ref DataKey }
+      PointInTimeRecoverySpecification: { PointInTimeRecoveryEnabled: true }
+
+  # Private repository for customers' template images. Hosts never get ECR
+  # permissions: the control plane mints short-lived pull tokens for them.
+  TemplateRepository:
+    Type: AWS::ECR::Repository
+    DeletionPolicy: Delete # removed with the stack (clean uninstall)
+    UpdateReplacePolicy: Delete
+    Metadata:
+      checkov:
+        skip:
+          - id: CKV_AWS_51
+            comment: >-
+              Template images are rebuilt and re-pushed under the same tag (for example
+              :latest). A template build pins the image by digest, so a moved tag never
+              changes an existing template.
+    Properties:
+      EmptyOnDelete: true
+      ImageTagMutability: MUTABLE
+      ImageScanningConfiguration:
+        ScanOnPush: true
+      EncryptionConfiguration:
+        EncryptionType: KMS
+        KmsKey: !GetAtt DataKey.Arn
+      LifecyclePolicy:
+        LifecyclePolicyText: |
+          {"rules":[{"rulePriority":1,"description":"Expire untagged images after 14 days","selection":{"tagStatus":"untagged","countType":"sinceImagePushed","countUnit":"days","countNumber":14},"action":{"type":"expire"}}]}
+
+  # 48 random characters; the control plane ensures this admin API key exists
+  # at startup. Retrieve it once to create team keys with the weft-sandbox CLI.
+  AdminKeySecret:
+    Type: AWS::SecretsManager::Secret
+    DeletionPolicy: Delete # removed with the stack (clean uninstall)
+    UpdateReplacePolicy: Delete
+    Metadata:
+      checkov:
+        skip:
+          - id: CKV2_AWS_57
+            comment: >-
+              Bootstrap admin API key read by the control plane at startup. Rotating the
+              secret value would not revoke the old key inside the application; rotate
+              admin keys with the weft-sandbox CLI instead (see deploy/README.md).
+    Properties:
+      Description: !Sub "Weft Sandboxes (${AWS::StackName}) bootstrap admin API key"
+      KmsKeyId: !Ref DataKey
+      GenerateSecretString:
+        PasswordLength: 48
+        ExcludePunctuation: true
+        IncludeSpace: false
+
+  LicenseKeySecret:
+    Type: AWS::SecretsManager::Secret
+    Condition: LicenseKeyMode
+    DeletionPolicy: Delete # removed with the stack (clean uninstall)
+    UpdateReplacePolicy: Delete
+    Metadata:
+      cfn-lint:
+        config:
+          ignore_checks:
+            - W1030 # LicenseKey may be empty only with LicenseMode=marketplace, when this resource is not created (LicenseKeyRequired rule).
+      checkov:
+        skip:
+          - id: CKV2_AWS_57
+            comment: Holds the customer's Weft license key, which is issued by Weft and replaced with a stack update, not rotated.
+    Properties:
+      Description: !Sub "Weft Sandboxes (${AWS::StackName}) license key"
+      KmsKeyId: !Ref DataKey
+      SecretString: !Ref LicenseKey
+
+  # The egress interception CA ({"certPem","keyPem"}). The random value
+  # generated here is a placeholder that the EgressCa custom resource replaces
+  # at creation. Only the gateway task role can read it (see the policy below).
+  EgressCaSecret:
+    Type: AWS::SecretsManager::Secret
+    DeletionPolicy: Delete # removed with the stack (clean uninstall)
+    UpdateReplacePolicy: Delete
+    Metadata:
+      checkov:
+        skip:
+          - id: CKV2_AWS_57
+            comment: >-
+              A CA key is not rotated by a Lambda: sandboxes trust the CA certificate, so
+              rotation is a planned operation (replace the secret with a stack update).
+    Properties:
+      Description: !Sub "Weft Sandboxes (${AWS::StackName}) egress interception CA; readable only by the egress gateway"
+      KmsKeyId: !Ref DataKey
+      GenerateSecretString:
+        PasswordLength: 32
+        ExcludePunctuation: true
+
+  EgressCaSecretPolicy:
+    Type: AWS::SecretsManager::ResourcePolicy
+    Properties:
+      SecretId: !Ref EgressCaSecret
+      BlockPublicPolicy: true
+      ResourcePolicy:
+        Version: "2012-10-17"
+        Statement:
+          # Nobody but the egress gateway task role reads the CA key, whatever
+          # their IAM permissions (administrators included, short of editing
+          # this policy).
+          - Sid: OnlyTheGatewayReadsTheCaKey
+            Effect: Deny
+            Principal: "*"
+            Action: secretsmanager:GetSecretValue
+            Resource: "*"
+            Condition:
+              StringNotEquals:
+                aws:PrincipalArn: !GetAtt GatewayTaskRole.Arn
+          # Only the egress-ca function writes new CA versions.
+          - Sid: OnlyTheCaFunctionWritesTheCaKey
+            Effect: Deny
+            Principal: "*"
+            Action: secretsmanager:PutSecretValue
+            Resource: "*"
+            Condition:
+              StringNotEquals:
+                aws:PrincipalArn: !GetAtt EgressCaRole.Arn
+
+  # =========================================================================
+  # 5. Control plane: IAM
+  # =========================================================================
+
+  # api and worker tasks.
+  ControlPlaneTaskRole:
+    Type: AWS::IAM::Role
+    Properties:
+      Description: Weft control plane api and worker tasks
+      PermissionsBoundary: !If [HasPermissionsBoundary, !Ref PermissionsBoundaryArn, !Ref AWS::NoValue]
+      AssumeRolePolicyDocument:
+        Version: "2012-10-17"
+        Statement:
+          - Effect: Allow
+            Principal: { Service: ecs-tasks.amazonaws.com }
+            Action: sts:AssumeRole
+            # Confused-deputy protection: only ECS tasks in this account and Region.
+            Condition:
+              StringEquals: { "aws:SourceAccount": !Ref AWS::AccountId }
+              ArnLike: { "aws:SourceArn": !Sub "arn:${AWS::Partition}:ecs:${AWS::Region}:${AWS::AccountId}:*" }
+      Policies:
+        - PolicyName: control-plane
+          PolicyDocument:
+            Version: "2012-10-17"
+            Statement:
+              # Read and write the control plane's own tables (and the
+              # sandboxes table's teamId-index), nothing else in DynamoDB.
+              # No table administration (create, delete, update) actions.
+              - Sid: ReadWriteOwnTables
+                Effect: Allow
+                Action:
+                  - dynamodb:GetItem
+                  - dynamodb:BatchGetItem
+                  - dynamodb:Query
+                  - dynamodb:Scan
+                  - dynamodb:PutItem
+                  - dynamodb:UpdateItem
+                  - dynamodb:DeleteItem
+                  - dynamodb:BatchWriteItem
+                  - dynamodb:ConditionCheckItem
+                Resource:
+                  - !GetAtt TeamsTable.Arn
+                  - !GetAtt ApiKeysTable.Arn
+                  - !GetAtt TemplatesTable.Arn
+                  - !GetAtt BuildsTable.Arn
+                  - !GetAtt SandboxesTable.Arn
+                  - !Sub "${SandboxesTable.Arn}/index/*"
+                  - !GetAtt HostsTable.Arn
+                  - !GetAtt MetaTable.Arn
+              # Presign GET/PUT and multipart part uploads for hosts, and
+              # manage template and snapshot objects, in the artifacts bucket only.
+              - Sid: ArtifactObjects
+                Effect: Allow
+                Action: [s3:GetObject, s3:PutObject, s3:DeleteObject, s3:AbortMultipartUpload]
+                Resource: !Sub "${ArtifactsBucket.Arn}/*"
+              - Sid: ListArtifactsBucket
+                Effect: Allow
+                Action: s3:ListBucket
+                Resource: !GetAtt ArtifactsBucket.Arn
+              # The stack key, only as used by DynamoDB, S3 and ECR on this
+              # role's behalf (table items, artifact objects, image layers).
+              - Sid: UseStackKeyThroughDataServices
+                Effect: Allow
+                Action: [kms:Decrypt, kms:Encrypt, kms:GenerateDataKey, kms:DescribeKey]
+                Resource: !GetAtt DataKey.Arn
+                Condition:
+                  StringEquals:
+                    kms:ViaService:
+                      - !Sub "dynamodb.${AWS::Region}.${AWS::URLSuffix}"
+                      - !Sub "s3.${AWS::Region}.${AWS::URLSuffix}"
+                      - !Sub "ecr.${AWS::Region}.${AWS::URLSuffix}"
+              # Mint short-lived registry tokens that hosts use to pull
+              # template images. GetAuthorizationToken has no resource-level
+              # permissions; what a token can pull is limited by the next
+              # statement, because the token carries this role's permissions.
+              - Sid: MintRegistryTokens
+                Effect: Allow
+                Action: ecr:GetAuthorizationToken
+                Resource: "*"
+              - Sid: PullTemplateImages
+                Effect: Allow
+                Action:
+                  - ecr:BatchGetImage
+                  - ecr:GetDownloadUrlForLayer
+                  - ecr:BatchCheckLayerAvailability
+                  - ecr:DescribeImages
+                Resource: !GetAtt TemplateRepository.Arn
+              # Publish the SlotUtilization metric that scales the host fleet,
+              # in the stack's own namespace only (see HostScalingPolicy).
+              - Sid: PublishScalingMetric
+                Effect: Allow
+                Action: cloudwatch:PutMetricData
+                Resource: "*"
+                Condition:
+                  StringEquals:
+                    cloudwatch:namespace: !Ref AWS::StackName
+              # AWS Marketplace licensing (LicenseMode=marketplace only).
+              # License Manager does not support resource-level permissions
+              # for these actions.
+              - !If
+                - MarketplaceMode
+                - Sid: MarketplaceEntitlement
+                  Effect: Allow
+                  Action:
+                    - license-manager:CheckoutLicense
+                    - license-manager:CheckInLicense
+                    - license-manager:ExtendLicenseConsumption
+                    - license-manager:GetLicense
+                    - license-manager:ListReceivedLicenses
+                  Resource: "*"
+                - !Ref AWS::NoValue
+
+  # edge tasks: route requests to sandboxes, nothing more.
+  EdgeTaskRole:
+    Type: AWS::IAM::Role
+    Properties:
+      Description: Weft control plane edge proxy tasks
+      PermissionsBoundary: !If [HasPermissionsBoundary, !Ref PermissionsBoundaryArn, !Ref AWS::NoValue]
+      AssumeRolePolicyDocument:
+        Version: "2012-10-17"
+        Statement:
+          - Effect: Allow
+            Principal: { Service: ecs-tasks.amazonaws.com }
+            Action: sts:AssumeRole
+            Condition:
+              StringEquals: { "aws:SourceAccount": !Ref AWS::AccountId }
+              ArnLike: { "aws:SourceArn": !Sub "arn:${AWS::Partition}:ecs:${AWS::Region}:${AWS::AccountId}:*" }
+      Policies:
+        - PolicyName: edge
+          PolicyDocument:
+            Version: "2012-10-17"
+            Statement:
+              # Look up a sandbox and its host to route a request. Read-only,
+              # single items, two tables.
+              - Sid: LookUpSandboxesAndHosts
+                Effect: Allow
+                Action: dynamodb:GetItem
+                Resource: [!GetAtt SandboxesTable.Arn, !GetAtt HostsTable.Arn]
+              # The shared control plane startup reads the license state item
+              # from the meta table in every role (read-only here).
+              - Sid: ReadLicenseStateAtStartup
+                Effect: Allow
+                Action: dynamodb:GetItem
+                Resource: !GetAtt MetaTable.Arn
+                Condition:
+                  ForAllValues:StringEquals:
+                    dynamodb:LeadingKeys: ["license"]
+              - Sid: DecryptTableItems
+                Effect: Allow
+                Action: [kms:Decrypt, kms:DescribeKey]
+                Resource: !GetAtt DataKey.Arn
+                Condition:
+                  StringEquals:
+                    kms:ViaService: !Sub "dynamodb.${AWS::Region}.${AWS::URLSuffix}"
+
+  GatewayTaskRole:
+    Type: AWS::IAM::Role
+    Properties:
+      Description: Weft egress gateway tasks
+      PermissionsBoundary: !If [HasPermissionsBoundary, !Ref PermissionsBoundaryArn, !Ref AWS::NoValue]
+      AssumeRolePolicyDocument:
+        Version: "2012-10-17"
+        Statement:
+          - Effect: Allow
+            Principal: { Service: ecs-tasks.amazonaws.com }
+            Action: sts:AssumeRole
+            Condition:
+              StringEquals: { "aws:SourceAccount": !Ref AWS::AccountId }
+              ArnLike: { "aws:SourceArn": !Sub "arn:${AWS::Partition}:ecs:${AWS::Region}:${AWS::AccountId}:*" }
+      Policies:
+        - PolicyName: egress-gateway
+          PolicyDocument:
+            Version: "2012-10-17"
+            Statement:
+              # The interception CA certificate and key.
+              - Sid: ReadInterceptionCa
+                Effect: Allow
+                Action: secretsmanager:GetSecretValue
+                Resource: !Ref EgressCaSecret
+              # Credentials that egress policies inject into allowlisted API
+              # calls: only secrets the customer has explicitly tagged
+              # weft-sandbox-access=true.
+              - Sid: ReadSandboxCredentialSecrets
+                Effect: Allow
+                Action: secretsmanager:GetSecretValue
+                Resource: !Sub "arn:${AWS::Partition}:secretsmanager:${AWS::Region}:${AWS::AccountId}:secret:*"
+                Condition:
+                  StringEquals:
+                    secretsmanager:ResourceTag/weft-sandbox-access: "true"
+              # Decrypt those secrets, only through Secrets Manager (so only
+              # secrets the statements above allow). Covers the stack key and
+              # customer managed keys used for tagged secrets; each key's
+              # policy must also allow it.
+              - Sid: DecryptSecretsThroughSecretsManager
+                Effect: Allow
+                Action: kms:Decrypt
+                Resource: !Sub "arn:${AWS::Partition}:kms:${AWS::Region}:${AWS::AccountId}:key/*"
+                Condition:
+                  StringEquals:
+                    kms:ViaService: !Sub "secretsmanager.${AWS::Region}.${AWS::URLSuffix}"
+              # Defense in depth: never the stack's own secrets, even if tagged.
+              - Sid: NeverStackSecrets
+                Effect: Deny
+                Action: secretsmanager:*
+                Resource: !If
+                  - LicenseKeyMode
+                  - [!Ref AdminKeySecret, !Ref LicenseKeySecret]
+                  - [!Ref AdminKeySecret]
+
+  # Used by ECS (not the application) to pull images, write logs and
+  # inject the admin and license key secrets into control plane tasks.
+  ControlPlaneExecutionRole:
+    Type: AWS::IAM::Role
+    Properties:
+      Description: ECS task execution role for control plane tasks
+      PermissionsBoundary: !If [HasPermissionsBoundary, !Ref PermissionsBoundaryArn, !Ref AWS::NoValue]
+      AssumeRolePolicyDocument:
+        Version: "2012-10-17"
+        Statement:
+          - Effect: Allow
+            Principal: { Service: ecs-tasks.amazonaws.com }
+            Action: sts:AssumeRole
+            Condition:
+              StringEquals: { "aws:SourceAccount": !Ref AWS::AccountId }
+              ArnLike: { "aws:SourceArn": !Sub "arn:${AWS::Partition}:ecs:${AWS::Region}:${AWS::AccountId}:*" }
+      Policies:
+        - PolicyName: task-execution
+          PolicyDocument:
+            Version: "2012-10-17"
+            Statement:
+              # Container logs to the control plane log group only.
+              - Sid: WriteContainerLogs
+                Effect: Allow
+                Action: [logs:CreateLogStream, logs:PutLogEvents]
+                Resource: !GetAtt ControlPlaneLogGroup.Arn
+              # The two secrets injected as environment variables.
+              - Sid: ReadInjectedSecrets
+                Effect: Allow
+                Action: secretsmanager:GetSecretValue
+                Resource: !If
+                  - LicenseKeyMode
+                  - [!Ref AdminKeySecret, !Ref LicenseKeySecret]
+                  - [!Ref AdminKeySecret]
+              - Sid: DecryptInjectedSecrets
+                Effect: Allow
+                Action: kms:Decrypt
+                Resource: !GetAtt DataKey.Arn
+                Condition:
+                  StringEquals:
+                    kms:ViaService: !Sub "secretsmanager.${AWS::Region}.${AWS::URLSuffix}"
+              # Only when ControlPlaneImage points at an ECR mirror in this
+              # account (images from ghcr.io need no permissions).
+              - !If
+                - HasImageOverride
+                - Sid: PullMirroredImages
+                  Effect: Allow
+                  Action: [ecr:BatchGetImage, ecr:GetDownloadUrlForLayer, ecr:BatchCheckLayerAvailability]
+                  Resource: !Sub "arn:${AWS::Partition}:ecr:${AWS::Region}:${AWS::AccountId}:repository/*"
+                - !Ref AWS::NoValue
+              - !If
+                - HasImageOverride
+                - Sid: EcrLogin
+                  Effect: Allow
+                  Action: ecr:GetAuthorizationToken
+                  Resource: "*"
+                - !Ref AWS::NoValue
+
+  GatewayExecutionRole:
+    Type: AWS::IAM::Role
+    Properties:
+      Description: ECS task execution role for egress gateway tasks
+      PermissionsBoundary: !If [HasPermissionsBoundary, !Ref PermissionsBoundaryArn, !Ref AWS::NoValue]
+      AssumeRolePolicyDocument:
+        Version: "2012-10-17"
+        Statement:
+          - Effect: Allow
+            Principal: { Service: ecs-tasks.amazonaws.com }
+            Action: sts:AssumeRole
+            Condition:
+              StringEquals: { "aws:SourceAccount": !Ref AWS::AccountId }
+              ArnLike: { "aws:SourceArn": !Sub "arn:${AWS::Partition}:ecs:${AWS::Region}:${AWS::AccountId}:*" }
+      Policies:
+        - PolicyName: task-execution
+          PolicyDocument:
+            Version: "2012-10-17"
+            Statement:
+              - Sid: WriteContainerLogs
+                Effect: Allow
+                Action: [logs:CreateLogStream, logs:PutLogEvents]
+                Resource: !GetAtt GatewayLogGroup.Arn
+              - !If
+                - HasImageOverride
+                - Sid: PullMirroredImages
+                  Effect: Allow
+                  Action: [ecr:BatchGetImage, ecr:GetDownloadUrlForLayer, ecr:BatchCheckLayerAvailability]
+                  Resource: !Sub "arn:${AWS::Partition}:ecr:${AWS::Region}:${AWS::AccountId}:repository/*"
+                - !Ref AWS::NoValue
+              - !If
+                - HasImageOverride
+                - Sid: EcrLogin
+                  Effect: Allow
+                  Action: ecr:GetAuthorizationToken
+                  Resource: "*"
+                - !Ref AWS::NoValue
+
+  # =========================================================================
+  # 5. Control plane: ECS
+  # =========================================================================
+
+  Cluster:
+    Type: AWS::ECS::Cluster
+    Properties:
+      ClusterSettings:
+        - Name: containerInsights
+          Value: enabled
+
+  ApiTaskDefinition:
+    Type: AWS::ECS::TaskDefinition
+    Properties:
+      Family: !Sub "${AWS::StackName}-api"
+      RequiresCompatibilities: [FARGATE]
+      NetworkMode: awsvpc
+      Cpu: !FindInMap [TaskSize, !Ref ControlPlaneTaskSize, Cpu]
+      Memory: !FindInMap [TaskSize, !Ref ControlPlaneTaskSize, Memory]
+      RuntimePlatform: { OperatingSystemFamily: LINUX, CpuArchitecture: X86_64 }
+      ExecutionRoleArn: !GetAtt ControlPlaneExecutionRole.Arn
+      TaskRoleArn: !GetAtt ControlPlaneTaskRole.Arn
+      Volumes: [{ Name: tmp }]
+      ContainerDefinitions:
+        - Name: control-plane
+          Image: !If [HasControlPlaneImageOverride, !Ref ControlPlaneImage, !FindInMap [Release, Images, ControlPlane]]
+          Essential: true
+          User: "65532:65532"
+          ReadonlyRootFilesystem: true
+          Privileged: false
+          LinuxParameters:
+            InitProcessEnabled: true
+            Capabilities: { Drop: [ALL] }
+          MountPoints: [{ SourceVolume: tmp, ContainerPath: /tmp, ReadOnly: false }]
+          PortMappings: [{ ContainerPort: 3000, Protocol: tcp }]
+          StopTimeout: 30
+          Environment:
+            - { Name: WEFT_ROLES, Value: api }
+            - { Name: WEFT_DOMAIN, Value: !Ref DomainName }
+            - { Name: AWS_REGION, Value: !Ref AWS::Region }
+            - { Name: WEFT_VERSION, Value: !FindInMap [Release, Version, Value] }
+            - { Name: WEFT_STORE, Value: dynamodb }
+            - { Name: WEFT_TABLE_PREFIX, Value: !Sub "${AWS::StackName}-" }
+            - { Name: WEFT_ARTIFACTS_BUCKET, Value: !Ref ArtifactsBucket }
+            - { Name: WEFT_INTERNAL_AUTH, Value: aws-iam }
+            - { Name: WEFT_SERVER_ID, Value: !Ref AWS::StackName }
+            - { Name: WEFT_AWS_ACCOUNT_ID, Value: !Ref AWS::AccountId }
+            - { Name: WEFT_HOST_ROLE_NAME, Value: !Ref HostRole }
+            - { Name: WEFT_GATEWAY_ROLE_NAME, Value: !Ref GatewayTaskRole }
+            - { Name: WEFT_BOOTSTRAP_TEMPLATES, Value: !Ref BootstrapTemplates }
+            - { Name: WEFT_METRICS_NAMESPACE, Value: !Ref AWS::StackName }
+            - { Name: WEFT_ECR_REGISTRY, Value: !Sub "${AWS::AccountId}.dkr.ecr.${AWS::Region}.${AWS::URLSuffix}" }
+            - { Name: WEFT_EGRESS_CA_CERT, Value: !GetAtt EgressCa.CertPem }
+            - { Name: WEFT_LICENSE_MODE, Value: !Ref LicenseMode }
+            - !If [MarketplaceMode, { Name: WEFT_MARKETPLACE_PRODUCT_SKU, Value: !Ref MarketplaceProductSku }, !Ref AWS::NoValue]
+          Secrets:
+            - { Name: WEFT_BOOTSTRAP_ADMIN_KEY, ValueFrom: !Ref AdminKeySecret }
+            - !If [LicenseKeyMode, { Name: WEFT_LICENSE_KEY, ValueFrom: !Ref LicenseKeySecret }, !Ref AWS::NoValue]
+          LogConfiguration:
+            LogDriver: awslogs
+            Options:
+              awslogs-group: !Ref ControlPlaneLogGroup
+              awslogs-region: !Ref AWS::Region
+              awslogs-stream-prefix: api
+              mode: non-blocking
+              max-buffer-size: 25m
+
+  EdgeTaskDefinition:
+    Type: AWS::ECS::TaskDefinition
+    Properties:
+      Family: !Sub "${AWS::StackName}-edge"
+      RequiresCompatibilities: [FARGATE]
+      NetworkMode: awsvpc
+      Cpu: !FindInMap [TaskSize, !Ref ControlPlaneTaskSize, Cpu]
+      Memory: !FindInMap [TaskSize, !Ref ControlPlaneTaskSize, Memory]
+      RuntimePlatform: { OperatingSystemFamily: LINUX, CpuArchitecture: X86_64 }
+      ExecutionRoleArn: !GetAtt ControlPlaneExecutionRole.Arn
+      TaskRoleArn: !GetAtt EdgeTaskRole.Arn
+      Volumes: [{ Name: tmp }]
+      ContainerDefinitions:
+        - Name: control-plane
+          Image: !If [HasControlPlaneImageOverride, !Ref ControlPlaneImage, !FindInMap [Release, Images, ControlPlane]]
+          Essential: true
+          User: "65532:65532"
+          ReadonlyRootFilesystem: true
+          Privileged: false
+          LinuxParameters:
+            InitProcessEnabled: true
+            Capabilities: { Drop: [ALL] }
+          MountPoints: [{ SourceVolume: tmp, ContainerPath: /tmp, ReadOnly: false }]
+          PortMappings: [{ ContainerPort: 3001, Protocol: tcp }]
+          # Long-lived streaming connections get the Fargate maximum to drain.
+          StopTimeout: 120
+          Ulimits: [{ Name: nofile, SoftLimit: 65536, HardLimit: 65536 }]
+          Environment:
+            - { Name: WEFT_ROLES, Value: edge }
+            - { Name: WEFT_DOMAIN, Value: !Ref DomainName }
+            - { Name: AWS_REGION, Value: !Ref AWS::Region }
+            - { Name: WEFT_VERSION, Value: !FindInMap [Release, Version, Value] }
+            - { Name: WEFT_STORE, Value: dynamodb }
+            - { Name: WEFT_TABLE_PREFIX, Value: !Sub "${AWS::StackName}-" }
+            - { Name: WEFT_INTERNAL_AUTH, Value: aws-iam }
+            - { Name: WEFT_SERVER_ID, Value: !Ref AWS::StackName }
+            - { Name: WEFT_AWS_ACCOUNT_ID, Value: !Ref AWS::AccountId }
+            - { Name: WEFT_HOST_ROLE_NAME, Value: !Ref HostRole }
+            - { Name: WEFT_GATEWAY_ROLE_NAME, Value: !Ref GatewayTaskRole }
+            - { Name: WEFT_LICENSE_MODE, Value: !Ref LicenseMode }
+            - !If [MarketplaceMode, { Name: WEFT_MARKETPLACE_PRODUCT_SKU, Value: !Ref MarketplaceProductSku }, !Ref AWS::NoValue]
+          # No WEFT_LICENSE_KEY: the edge does not enforce the license, and
+          # without a configured key its startup only reads the license state.
+          LogConfiguration:
+            LogDriver: awslogs
+            Options:
+              awslogs-group: !Ref ControlPlaneLogGroup
+              awslogs-region: !Ref AWS::Region
+              awslogs-stream-prefix: edge
+              mode: non-blocking
+              max-buffer-size: 25m
+
+  WorkerTaskDefinition:
+    Type: AWS::ECS::TaskDefinition
+    Properties:
+      Family: !Sub "${AWS::StackName}-worker"
+      RequiresCompatibilities: [FARGATE]
+      NetworkMode: awsvpc
+      Cpu: !FindInMap [TaskSize, !Ref ControlPlaneTaskSize, WorkerCpu]
+      Memory: !FindInMap [TaskSize, !Ref ControlPlaneTaskSize, WorkerMemory]
+      RuntimePlatform: { OperatingSystemFamily: LINUX, CpuArchitecture: X86_64 }
+      ExecutionRoleArn: !GetAtt ControlPlaneExecutionRole.Arn
+      TaskRoleArn: !GetAtt ControlPlaneTaskRole.Arn
+      Volumes: [{ Name: tmp }]
+      ContainerDefinitions:
+        - Name: control-plane
+          Image: !If [HasControlPlaneImageOverride, !Ref ControlPlaneImage, !FindInMap [Release, Images, ControlPlane]]
+          Essential: true
+          User: "65532:65532"
+          ReadonlyRootFilesystem: true
+          Privileged: false
+          LinuxParameters:
+            InitProcessEnabled: true
+            Capabilities: { Drop: [ALL] }
+          MountPoints: [{ SourceVolume: tmp, ContainerPath: /tmp, ReadOnly: false }]
+          StopTimeout: 30
+          Environment:
+            - { Name: WEFT_ROLES, Value: worker }
+            - { Name: WEFT_DOMAIN, Value: !Ref DomainName }
+            - { Name: AWS_REGION, Value: !Ref AWS::Region }
+            - { Name: WEFT_VERSION, Value: !FindInMap [Release, Version, Value] }
+            - { Name: WEFT_STORE, Value: dynamodb }
+            - { Name: WEFT_TABLE_PREFIX, Value: !Sub "${AWS::StackName}-" }
+            - { Name: WEFT_ARTIFACTS_BUCKET, Value: !Ref ArtifactsBucket }
+            - { Name: WEFT_INTERNAL_AUTH, Value: aws-iam }
+            - { Name: WEFT_SERVER_ID, Value: !Ref AWS::StackName }
+            - { Name: WEFT_AWS_ACCOUNT_ID, Value: !Ref AWS::AccountId }
+            - { Name: WEFT_HOST_ROLE_NAME, Value: !Ref HostRole }
+            - { Name: WEFT_GATEWAY_ROLE_NAME, Value: !Ref GatewayTaskRole }
+            - { Name: WEFT_BOOTSTRAP_TEMPLATES, Value: !Ref BootstrapTemplates }
+            - { Name: WEFT_METRICS_NAMESPACE, Value: !Ref AWS::StackName }
+            - { Name: WEFT_ECR_REGISTRY, Value: !Sub "${AWS::AccountId}.dkr.ecr.${AWS::Region}.${AWS::URLSuffix}" }
+            - { Name: WEFT_EGRESS_CA_CERT, Value: !GetAtt EgressCa.CertPem }
+            - { Name: WEFT_LICENSE_MODE, Value: !Ref LicenseMode }
+            - !If [MarketplaceMode, { Name: WEFT_MARKETPLACE_PRODUCT_SKU, Value: !Ref MarketplaceProductSku }, !Ref AWS::NoValue]
+          Secrets:
+            - { Name: WEFT_BOOTSTRAP_ADMIN_KEY, ValueFrom: !Ref AdminKeySecret }
+            - !If [LicenseKeyMode, { Name: WEFT_LICENSE_KEY, ValueFrom: !Ref LicenseKeySecret }, !Ref AWS::NoValue]
+          LogConfiguration:
+            LogDriver: awslogs
+            Options:
+              awslogs-group: !Ref ControlPlaneLogGroup
+              awslogs-region: !Ref AWS::Region
+              awslogs-stream-prefix: worker
+              mode: non-blocking
+              max-buffer-size: 25m
+
+  GatewayTaskDefinition:
+    Type: AWS::ECS::TaskDefinition
+    Properties:
+      Family: !Sub "${AWS::StackName}-egress-gateway"
+      RequiresCompatibilities: [FARGATE]
+      NetworkMode: awsvpc
+      Cpu: !FindInMap [TaskSize, !Ref ControlPlaneTaskSize, Cpu]
+      Memory: !FindInMap [TaskSize, !Ref ControlPlaneTaskSize, Memory]
+      RuntimePlatform: { OperatingSystemFamily: LINUX, CpuArchitecture: X86_64 }
+      ExecutionRoleArn: !GetAtt GatewayExecutionRole.Arn
+      TaskRoleArn: !GetAtt GatewayTaskRole.Arn
+      ContainerDefinitions:
+        - Name: egress-gateway
+          Image: !If [HasGatewayImageOverride, !Ref GatewayImage, !FindInMap [Release, Images, Gateway]]
+          Essential: true
+          User: "65532:65532"
+          ReadonlyRootFilesystem: true
+          Privileged: false
+          LinuxParameters:
+            InitProcessEnabled: true
+            Capabilities: { Drop: [ALL] }
+          PortMappings:
+            - { ContainerPort: 15000, Protocol: tcp }
+            - { ContainerPort: 15080, Protocol: tcp }
+          # The gateway drains for 25 s after SIGTERM.
+          StopTimeout: 30
+          Ulimits: [{ Name: nofile, SoftLimit: 65536, HardLimit: 65536 }]
+          Environment:
+            - { Name: WEFT_CONTROL_PLANE_URL, Value: !Sub "https://api.${DomainName}" }
+            - { Name: WEFT_SERVER_ID, Value: !Ref AWS::StackName }
+            - { Name: AWS_REGION, Value: !Ref AWS::Region }
+            - { Name: WEFT_CA_SECRET_ID, Value: !Ref EgressCaSecret }
+            - { Name: RUST_LOG, Value: info }
+          LogConfiguration:
+            LogDriver: awslogs
+            Options:
+              awslogs-group: !Ref GatewayLogGroup
+              awslogs-region: !Ref AWS::Region
+              awslogs-stream-prefix: gateway
+              mode: non-blocking
+              max-buffer-size: 25m
+
+  ApiService:
+    Type: AWS::ECS::Service
+    Metadata:
+      cfn-lint:
+        config:
+          ignore_checks:
+            # PrivateSubnetIds/PublicSubnetIds default to empty for the new-VPC
+            # case, which uses the stack's own subnets; the ExistingVpc* rules
+            # guarantee real subnet IDs whenever this branch is taken.
+            - W1030
+    # Listener rules must exist before ECS registers targets; Cleanup must be
+    # deleted after this service (it empties the bucket the service writes to).
+    DependsOn: [ApiListenerRule, Cleanup, ReleaseVerification]
+    Properties:
+      Cluster: !Ref Cluster
+      TaskDefinition: !Ref ApiTaskDefinition
+      LaunchType: FARGATE
+      PlatformVersion: LATEST
+      DesiredCount: !Ref ApiDesiredCount
+      AvailabilityZoneRebalancing: ENABLED
+      HealthCheckGracePeriodSeconds: 60
+      EnableExecuteCommand: false
+      EnableECSManagedTags: true
+      PropagateTags: SERVICE
+      DeploymentConfiguration:
+        MinimumHealthyPercent: 100
+        MaximumPercent: 200
+        DeploymentCircuitBreaker: { Enable: true, Rollback: true }
+      NetworkConfiguration:
+        AwsvpcConfiguration:
+          AssignPublicIp: DISABLED
+          SecurityGroups: [!Ref ApiSecurityGroup]
+          Subnets: !If [CreateVpc, [!Ref PrivateSubnet1, !Ref PrivateSubnet2], !Ref PrivateSubnetIds]
+      LoadBalancers:
+        - ContainerName: control-plane
+          ContainerPort: 3000
+          TargetGroupArn: !Ref ApiTargetGroup
+        - !If
+          - PublicLoadBalancer
+          - ContainerName: control-plane
+            ContainerPort: 3000
+            TargetGroupArn: !Ref PublicApiTargetGroup
+          - !Ref AWS::NoValue
+      Tags:
+        - Key: weft:component
+          Value: api
+        # Makes the service wait for the public listener rule when there is one
+        # (DependsOn cannot name a conditional resource).
+        - Key: weft:public-listener-rule
+          Value: !If [PublicLoadBalancer, !Ref PublicApiListenerRule, none]
+
+  EdgeService:
+    Type: AWS::ECS::Service
+    Metadata:
+      cfn-lint:
+        config:
+          ignore_checks:
+            # PrivateSubnetIds/PublicSubnetIds default to empty for the new-VPC
+            # case, which uses the stack's own subnets; the ExistingVpc* rules
+            # guarantee real subnet IDs whenever this branch is taken.
+            - W1030
+    DependsOn: [HttpsListener, Cleanup, ReleaseVerification]
+    Properties:
+      Cluster: !Ref Cluster
+      TaskDefinition: !Ref EdgeTaskDefinition
+      LaunchType: FARGATE
+      PlatformVersion: LATEST
+      DesiredCount: !Ref EdgeDesiredCount
+      AvailabilityZoneRebalancing: ENABLED
+      HealthCheckGracePeriodSeconds: 60
+      EnableExecuteCommand: false
+      EnableECSManagedTags: true
+      PropagateTags: SERVICE
+      DeploymentConfiguration:
+        MinimumHealthyPercent: 100
+        MaximumPercent: 200
+        DeploymentCircuitBreaker: { Enable: true, Rollback: true }
+      NetworkConfiguration:
+        AwsvpcConfiguration:
+          AssignPublicIp: DISABLED
+          SecurityGroups: [!Ref EdgeSecurityGroup]
+          Subnets: !If [CreateVpc, [!Ref PrivateSubnet1, !Ref PrivateSubnet2], !Ref PrivateSubnetIds]
+      LoadBalancers:
+        - ContainerName: control-plane
+          ContainerPort: 3001
+          TargetGroupArn: !Ref EdgeTargetGroup
+        - !If
+          - PublicLoadBalancer
+          - ContainerName: control-plane
+            ContainerPort: 3001
+            TargetGroupArn: !Ref PublicEdgeTargetGroup
+          - !Ref AWS::NoValue
+      Tags:
+        - Key: weft:component
+          Value: edge
+        - Key: weft:public-listener
+          Value: !If [PublicLoadBalancer, !Ref PublicHttpsListener, none]
+
+  # Exactly one worker: never two at once, even during deployments.
+  WorkerService:
+    Type: AWS::ECS::Service
+    Metadata:
+      cfn-lint:
+        config:
+          ignore_checks:
+            # PrivateSubnetIds/PublicSubnetIds default to empty for the new-VPC
+            # case, which uses the stack's own subnets; the ExistingVpc* rules
+            # guarantee real subnet IDs whenever this branch is taken.
+            - W1030
+    DependsOn: [Cleanup, ReleaseVerification]
+    Properties:
+      Cluster: !Ref Cluster
+      TaskDefinition: !Ref WorkerTaskDefinition
+      LaunchType: FARGATE
+      PlatformVersion: LATEST
+      DesiredCount: 1
+      EnableExecuteCommand: false
+      EnableECSManagedTags: true
+      PropagateTags: SERVICE
+      DeploymentConfiguration:
+        MinimumHealthyPercent: 0
+        MaximumPercent: 100
+        DeploymentCircuitBreaker: { Enable: true, Rollback: true }
+      NetworkConfiguration:
+        AwsvpcConfiguration:
+          AssignPublicIp: DISABLED
+          SecurityGroups: [!Ref WorkerSecurityGroup]
+          Subnets: !If [CreateVpc, [!Ref PrivateSubnet1, !Ref PrivateSubnet2], !Ref PrivateSubnetIds]
+      Tags:
+        - Key: weft:component
+          Value: worker
+
+  GatewayService:
+    Type: AWS::ECS::Service
+    Metadata:
+      cfn-lint:
+        config:
+          ignore_checks:
+            # PrivateSubnetIds/PublicSubnetIds default to empty for the new-VPC
+            # case, which uses the stack's own subnets; the ExistingVpc* rules
+            # guarantee real subnet IDs whenever this branch is taken.
+            - W1030
+    DependsOn: [Cleanup, ReleaseVerification]
+    Properties:
+      Cluster: !Ref Cluster
+      TaskDefinition: !Ref GatewayTaskDefinition
+      LaunchType: FARGATE
+      PlatformVersion: LATEST
+      DesiredCount: !Ref GatewayDesiredCount
+      AvailabilityZoneRebalancing: ENABLED
+      EnableExecuteCommand: false
+      EnableECSManagedTags: true
+      PropagateTags: SERVICE
+      DeploymentConfiguration:
+        MinimumHealthyPercent: 100
+        MaximumPercent: 200
+        DeploymentCircuitBreaker: { Enable: true, Rollback: true }
+      NetworkConfiguration:
+        AwsvpcConfiguration:
+          AssignPublicIp: DISABLED
+          SecurityGroups: [!Ref GatewaySecurityGroup]
+          Subnets: !If [CreateVpc, [!Ref PrivateSubnet1, !Ref PrivateSubnet2], !Ref PrivateSubnetIds]
+      # Hosts connect to task IPs directly (gateway.<InternalDomain>), so the
+      # gateway sees each host's real source address. A load balancer in
+      # between would hide it.
+      ServiceRegistries:
+        - RegistryArn: !GetAtt GatewayDiscoveryService.Arn
+      Tags:
+        - Key: weft:component
+          Value: egress-gateway
+
+  # =========================================================================
+  # 6. Load balancing, TLS and DNS
+  # =========================================================================
+
+  Certificate:
+    Type: AWS::CertificateManager::Certificate
+    Condition: CreateCertificate
+    Metadata:
+      checkov:
+        skip:
+          - id: CKV2_AWS_71
+            comment: >-
+              E2B SDKs address every sandbox port as https://<port>-<sandbox-id>.<domain>,
+              so the edge needs a wildcard certificate. It covers only the dedicated
+              sandbox domain, whose names resolve only inside the VPC.
+    Properties:
+      DomainName: !Sub "api.${DomainName}"
+      SubjectAlternativeNames: [!Sub "*.${DomainName}"]
+      ValidationMethod: DNS
+      DomainValidationOptions:
+        - DomainName: !Sub "api.${DomainName}"
+          HostedZoneId: !Ref PublicHostedZoneId
+        - DomainName: !Sub "*.${DomainName}"
+          HostedZoneId: !Ref PublicHostedZoneId
+
+  LoadBalancer:
+    Type: AWS::ElasticLoadBalancingV2::LoadBalancer
+    Metadata:
+      cfn-lint:
+        config:
+          ignore_checks:
+            # PrivateSubnetIds/PublicSubnetIds default to empty for the new-VPC
+            # case, which uses the stack's own subnets; the ExistingVpc* rules
+            # guarantee real subnet IDs whenever this branch is taken.
+            - W1030
+      checkov:
+        skip:
+          - id: CKV_AWS_91
+            comment: Access logging is enabled when AccessLogsBucketName is set; ALB access logs require an SSE-S3 bucket with an ELB delivery policy, usually the organization's log archive.
+          - id: CKV_AWS_150
+            comment: Deletion protection would block the clean uninstall the product promises; the stack itself is the unit of protection (use stack termination protection).
+          - id: CKV2_AWS_28
+            comment: Internal load balancer reachable only from the VPC; attach AWS WAF separately if your policy requires it.
+    Properties:
+      Type: application
+      Scheme: internal
+      IpAddressType: ipv4
+      Subnets: !If [CreateVpc, [!Ref PrivateSubnet1, !Ref PrivateSubnet2], !Ref PrivateSubnetIds]
+      SecurityGroups: [!Ref LoadBalancerSecurityGroup]
+      LoadBalancerAttributes:
+        # Sandbox connections (terminals, streamed commands) are long-lived.
+        - { Key: idle_timeout.timeout_seconds, Value: "3600" }
+        - { Key: routing.http2.enabled, Value: "true" }
+        - { Key: routing.http.drop_invalid_header_fields.enabled, Value: "true" }
+        - { Key: routing.http.desync_mitigation_mode, Value: defensive }
+        - { Key: deletion_protection.enabled, Value: "false" }
+        - { Key: access_logs.s3.enabled, Value: !If [HasAccessLogs, "true", "false"] }
+        - !If [HasAccessLogs, { Key: access_logs.s3.bucket, Value: !Ref AccessLogsBucketName }, !Ref AWS::NoValue]
+        - !If [HasAccessLogs, { Key: access_logs.s3.prefix, Value: !Sub "alb/${AWS::StackName}/internal" }, !Ref AWS::NoValue]
+
+  ApiTargetGroup:
+    Type: AWS::ElasticLoadBalancingV2::TargetGroup
+    Properties:
+      TargetType: ip
+      Protocol: HTTP
+      ProtocolVersion: HTTP1
+      Port: 3000
+      VpcId: !If [CreateVpc, !Ref Vpc, !Ref VpcId]
+      HealthCheckEnabled: true
+      HealthCheckProtocol: HTTP
+      HealthCheckPath: /health
+      HealthCheckIntervalSeconds: 15
+      HealthCheckTimeoutSeconds: 5
+      HealthyThresholdCount: 2
+      UnhealthyThresholdCount: 3
+      Matcher: { HttpCode: "200" }
+      TargetGroupAttributes:
+        - { Key: deregistration_delay.timeout_seconds, Value: "30" }
+
+  EdgeTargetGroup:
+    Type: AWS::ElasticLoadBalancingV2::TargetGroup
+    Properties:
+      TargetType: ip
+      Protocol: HTTP
+      ProtocolVersion: HTTP1
+      Port: 3001
+      VpcId: !If [CreateVpc, !Ref Vpc, !Ref VpcId]
+      HealthCheckEnabled: true
+      HealthCheckProtocol: HTTP
+      HealthCheckPath: /healthz
+      HealthCheckIntervalSeconds: 15
+      HealthCheckTimeoutSeconds: 5
+      HealthyThresholdCount: 2
+      UnhealthyThresholdCount: 3
+      Matcher: { HttpCode: "200" }
+      TargetGroupAttributes:
+        # Let long-lived connections drain (the task's StopTimeout is 120 s).
+        - { Key: deregistration_delay.timeout_seconds, Value: "110" }
+
+  HttpsListener:
+    Type: AWS::ElasticLoadBalancingV2::Listener
+    Properties:
+      LoadBalancerArn: !Ref LoadBalancer
+      Port: 443
+      Protocol: HTTPS
+      SslPolicy: ELBSecurityPolicy-TLS13-1-2-2021-06
+      Certificates:
+        - CertificateArn: !If [CreateCertificate, !Ref Certificate, !Ref CertificateArn]
+      # Everything that is not the API is a sandbox URL: <port>-<id>.<domain>.
+      DefaultActions:
+        - Type: forward
+          TargetGroupArn: !Ref EdgeTargetGroup
+
+  ApiListenerRule:
+    Type: AWS::ElasticLoadBalancingV2::ListenerRule
+    Properties:
+      ListenerArn: !Ref HttpsListener
+      Priority: 10
+      Conditions:
+        - Field: host-header
+          HostHeaderConfig:
+            Values: [!Sub "api.${DomainName}"]
+      Actions:
+        - Type: forward
+          TargetGroupArn: !Ref ApiTargetGroup
+
+  # --- Optional public load balancer (evaluation) ----------------------------
+  PublicLoadBalancer:
+    Type: AWS::ElasticLoadBalancingV2::LoadBalancer
+    Condition: PublicLoadBalancer
+    Metadata:
+      cfn-lint:
+        config:
+          ignore_checks:
+            # PrivateSubnetIds/PublicSubnetIds default to empty for the new-VPC
+            # case, which uses the stack's own subnets; the ExistingVpc* rules
+            # guarantee real subnet IDs whenever this branch is taken.
+            - W1030
+      checkov:
+        skip:
+          - id: CKV_AWS_91
+            comment: Access logging is enabled when AccessLogsBucketName is set.
+          - id: CKV_AWS_150
+            comment: Deletion protection would block the clean uninstall; evaluation-only resource.
+          - id: CKV2_AWS_28
+            comment: Evaluation-only; restricted to PublicAllowedCidr by its security group. Attach AWS WAF if required.
+    Properties:
+      Type: application
+      Scheme: internet-facing
+      IpAddressType: ipv4
+      Subnets: !If [CreateVpc, [!Ref PublicSubnet1, !Ref PublicSubnet2], !Ref PublicSubnetIds]
+      SecurityGroups: [!Ref PublicLoadBalancerSecurityGroup]
+      LoadBalancerAttributes:
+        - { Key: idle_timeout.timeout_seconds, Value: "3600" }
+        - { Key: routing.http2.enabled, Value: "true" }
+        - { Key: routing.http.drop_invalid_header_fields.enabled, Value: "true" }
+        - { Key: routing.http.desync_mitigation_mode, Value: defensive }
+        - { Key: deletion_protection.enabled, Value: "false" }
+        - { Key: access_logs.s3.enabled, Value: !If [HasAccessLogs, "true", "false"] }
+        - !If [HasAccessLogs, { Key: access_logs.s3.bucket, Value: !Ref AccessLogsBucketName }, !Ref AWS::NoValue]
+        - !If [HasAccessLogs, { Key: access_logs.s3.prefix, Value: !Sub "alb/${AWS::StackName}/public" }, !Ref AWS::NoValue]
+
+  PublicApiTargetGroup:
+    Type: AWS::ElasticLoadBalancingV2::TargetGroup
+    Condition: PublicLoadBalancer
+    Properties:
+      TargetType: ip
+      Protocol: HTTP
+      ProtocolVersion: HTTP1
+      Port: 3000
+      VpcId: !If [CreateVpc, !Ref Vpc, !Ref VpcId]
+      HealthCheckEnabled: true
+      HealthCheckProtocol: HTTP
+      HealthCheckPath: /health
+      HealthCheckIntervalSeconds: 15
+      HealthyThresholdCount: 2
+      UnhealthyThresholdCount: 3
+      Matcher: { HttpCode: "200" }
+      TargetGroupAttributes:
+        - { Key: deregistration_delay.timeout_seconds, Value: "30" }
+
+  PublicEdgeTargetGroup:
+    Type: AWS::ElasticLoadBalancingV2::TargetGroup
+    Condition: PublicLoadBalancer
+    Properties:
+      TargetType: ip
+      Protocol: HTTP
+      ProtocolVersion: HTTP1
+      Port: 3001
+      VpcId: !If [CreateVpc, !Ref Vpc, !Ref VpcId]
+      HealthCheckEnabled: true
+      HealthCheckProtocol: HTTP
+      HealthCheckPath: /healthz
+      HealthCheckIntervalSeconds: 15
+      HealthyThresholdCount: 2
+      UnhealthyThresholdCount: 3
+      Matcher: { HttpCode: "200" }
+      TargetGroupAttributes:
+        - { Key: deregistration_delay.timeout_seconds, Value: "110" }
+
+  PublicHttpsListener:
+    Type: AWS::ElasticLoadBalancingV2::Listener
+    Condition: PublicLoadBalancer
+    Properties:
+      LoadBalancerArn: !Ref PublicLoadBalancer
+      Port: 443
+      Protocol: HTTPS
+      SslPolicy: ELBSecurityPolicy-TLS13-1-2-2021-06
+      Certificates:
+        - CertificateArn: !If [CreateCertificate, !Ref Certificate, !Ref CertificateArn]
+      DefaultActions:
+        - Type: forward
+          TargetGroupArn: !Ref PublicEdgeTargetGroup
+
+  PublicApiListenerRule:
+    Type: AWS::ElasticLoadBalancingV2::ListenerRule
+    Condition: PublicLoadBalancer
+    Properties:
+      ListenerArn: !Ref PublicHttpsListener
+      Priority: 10
+      Conditions:
+        - Field: host-header
+          HostHeaderConfig:
+            Values: [!Sub "api.${DomainName}"]
+      Actions:
+        - Type: forward
+          TargetGroupArn: !Ref PublicApiTargetGroup
+
+  # --- DNS -----------------------------------------------------------------
+  # Inside the VPC, the domain resolves to the internal load balancer. For
+  # clients in connected networks, forward the domain to a Route 53 Resolver
+  # inbound endpoint (or associate this zone with their VPCs).
+  PrivateHostedZone:
+    Type: AWS::Route53::HostedZone
+    Metadata:
+      checkov:
+        skip:
+          - id: CKV2_AWS_39
+            comment: Private zone with two static alias records; enable Route 53 Resolver query logging at the VPC level if required.
+          - id: CKV2_AWS_38
+            comment: DNSSEC signing applies to public hosted zones only.
+    Properties:
+      Name: !Ref DomainName
+      HostedZoneConfig:
+        Comment: !Sub "Weft Sandboxes (${AWS::StackName}) private zone"
+      VPCs:
+        - VPCId: !If [CreateVpc, !Ref Vpc, !Ref VpcId]
+          VPCRegion: !Ref AWS::Region
+
+  ApiDnsRecord:
+    Type: AWS::Route53::RecordSet
+    Properties:
+      HostedZoneId: !Ref PrivateHostedZone
+      Name: !Sub "api.${DomainName}"
+      Type: A
+      AliasTarget:
+        DNSName: !GetAtt LoadBalancer.DNSName
+        HostedZoneId: !GetAtt LoadBalancer.CanonicalHostedZoneID
+        EvaluateTargetHealth: false
+
+  WildcardDnsRecord:
+    Type: AWS::Route53::RecordSet
+    Properties:
+      HostedZoneId: !Ref PrivateHostedZone
+      Name: !Sub "*.${DomainName}"
+      Type: A
+      AliasTarget:
+        DNSName: !GetAtt LoadBalancer.DNSName
+        HostedZoneId: !GetAtt LoadBalancer.CanonicalHostedZoneID
+        EvaluateTargetHealth: false
+
+  PublicApiDnsRecord:
+    Type: AWS::Route53::RecordSet
+    Condition: CreatePublicDns
+    Properties:
+      HostedZoneId: !Ref PublicHostedZoneId
+      Name: !Sub "api.${DomainName}"
+      Type: A
+      AliasTarget:
+        DNSName: !GetAtt PublicLoadBalancer.DNSName
+        HostedZoneId: !GetAtt PublicLoadBalancer.CanonicalHostedZoneID
+        EvaluateTargetHealth: false
+
+  PublicWildcardDnsRecord:
+    Type: AWS::Route53::RecordSet
+    Condition: CreatePublicDns
+    Properties:
+      HostedZoneId: !Ref PublicHostedZoneId
+      Name: !Sub "*.${DomainName}"
+      Type: A
+      AliasTarget:
+        DNSName: !GetAtt PublicLoadBalancer.DNSName
+        HostedZoneId: !GetAtt PublicLoadBalancer.CanonicalHostedZoneID
+        EvaluateTargetHealth: false
+
+  InternalNamespace:
+    Type: AWS::ServiceDiscovery::PrivateDnsNamespace
+    Properties:
+      Name: !Ref InternalDomain
+      Description: !Sub "Weft Sandboxes (${AWS::StackName}) internal services"
+      Vpc: !If [CreateVpc, !Ref Vpc, !Ref VpcId]
+
+  # gateway.<InternalDomain>: one A record per running gateway task.
+  GatewayDiscoveryService:
+    Type: AWS::ServiceDiscovery::Service
+    Properties:
+      Name: gateway
+      NamespaceId: !Ref InternalNamespace
+      DnsConfig:
+        RoutingPolicy: MULTIVALUE
+        DnsRecords:
+          - Type: A
+            TTL: 10
+      HealthCheckCustomConfig:
+        FailureThreshold: 1
+
+  # =========================================================================
+  # 7. Sandbox hosts
+  # =========================================================================
+
+  # The control plane identifies hosts by this role's name (STS
+  # GetCallerIdentity returns assumed-role/<name>/<instance-id>), so its name
+  # is passed to the control plane as WEFT_HOST_ROLE_NAME. Hosts get no S3 or
+  # ECR permissions: they use presigned URLs and registry tokens from the
+  # control plane.
+  HostRole:
+    Type: AWS::IAM::Role
+    Properties:
+      Description: Weft sandbox hosts (SSM Session Manager and own logs only)
+      PermissionsBoundary: !If [HasPermissionsBoundary, !Ref PermissionsBoundaryArn, !Ref AWS::NoValue]
+      AssumeRolePolicyDocument:
+        Version: "2012-10-17"
+        Statement:
+          - Effect: Allow
+            Principal: { Service: ec2.amazonaws.com }
+            Action: sts:AssumeRole
+      ManagedPolicyArns:
+        # Session Manager access instead of SSH, and SSM inventory/patching.
+        - !Sub "arn:${AWS::Partition}:iam::aws:policy/AmazonSSMManagedInstanceCore"
+      Policies:
+        - PolicyName: host
+          PolicyDocument:
+            Version: "2012-10-17"
+            Statement:
+              # The CloudWatch agent ships host-agent logs to the hosts log group only.
+              - Sid: WriteOwnLogs
+                Effect: Allow
+                Action: [logs:CreateLogStream, logs:PutLogEvents, logs:DescribeLogStreams]
+                Resource: !GetAtt HostLogGroup.Arn
+              # AmazonSSMManagedInstanceCore allows reading any SSM parameter;
+              # hosts do not need that, and they run untrusted code (inside
+              # microVMs), so take it away.
+              - Sid: NoParameterStoreReads
+                Effect: Deny
+                Action:
+                  - ssm:GetParameter
+                  - ssm:GetParameters
+                  - ssm:GetParametersByPath
+                  - ssm:GetParameterHistory
+                Resource: "*"
+
+  HostInstanceProfile:
+    Type: AWS::IAM::InstanceProfile
+    Properties:
+      Roles: [!Ref HostRole]
+
+  HostLaunchTemplate:
+    Type: AWS::EC2::LaunchTemplate
+    # A launch template version with an unverified AMI is never created.
+    DependsOn: ReleaseVerification
+    Properties:
+      TagSpecifications:
+        - ResourceType: launch-template
+          Tags:
+            - Key: weft:stack
+              Value: !Ref AWS::StackName
+      LaunchTemplateData:
+        ImageId: !If [HasAmiOverride, !Ref HostAmiId, !FindInMap [HostAmi, !Ref "AWS::Region", ImageId]]
+        IamInstanceProfile:
+          Arn: !GetAtt HostInstanceProfile.Arn
+        SecurityGroupIds: [!Ref HostSecurityGroup]
+        # IMDSv2 only, hop limit 1: nothing behind the host's network stack
+        # (containers, microVMs) can reach the metadata service.
+        MetadataOptions:
+          HttpEndpoint: enabled
+          HttpTokens: required
+          HttpPutResponseHopLimit: 1
+          HttpProtocolIpv6: disabled
+          InstanceMetadataTags: disabled
+        # Firecracker needs KVM: nested virtualization on C8i/M8i/R8i, or a
+        # bare-metal type (which must not set this option).
+        CpuOptions: !If [NestedVirtualization, { NestedVirtualization: enabled }, !Ref AWS::NoValue]
+        EbsOptimized: true
+        Monitoring:
+          Enabled: false
+        InstanceInitiatedShutdownBehavior: terminate
+        BlockDeviceMappings:
+          - DeviceName: /dev/xvda
+            Ebs:
+              VolumeType: gp3
+              VolumeSize: 30
+              Encrypted: true
+              KmsKeyId: !If [HasHostEbsKey, !Ref HostEbsKmsKeyArn, !Ref AWS::NoValue]
+              DeleteOnTermination: true
+          # /var/lib/weft: formatted XFS with reflink by weft-data-volume.service
+          # (instance store NVMe is used instead when the type has it).
+          - DeviceName: /dev/sdf
+            Ebs:
+              VolumeType: gp3
+              VolumeSize: !Ref HostDataVolumeGiB
+              Iops: !Ref HostDataVolumeIops
+              Throughput: !Ref HostDataVolumeThroughput
+              Encrypted: true
+              KmsKeyId: !If [HasHostEbsKey, !Ref HostEbsKmsKeyArn, !Ref AWS::NoValue]
+              DeleteOnTermination: true
+        TagSpecifications:
+          - ResourceType: instance
+            Tags:
+              - { Key: weft:stack, Value: !Ref AWS::StackName }
+          - ResourceType: volume
+            Tags:
+              - { Key: Name, Value: !Sub "${AWS::StackName}-host" }
+              - { Key: weft:stack, Value: !Ref AWS::StackName }
+        # Only stack settings; the AMI's weft-host-bootstrap adds the instance
+        # ID and private IP from IMDSv2 and starts weft-host-agent.service.
+        # No secrets: hosts authenticate with their IAM role.
+        UserData:
+          Fn::Base64: !Sub |
+            #!/bin/bash
+            set -euo pipefail
+            install -d -m 0755 -o root -g root /etc/weft
+            cat > /etc/weft/stack.env <<'WEFT_STACK_ENV'
+            WEFT_CONTROL_PLANE_URL=https://api.${DomainName}
+            WEFT_AUTH=aws-iam
+            WEFT_SERVER_ID=${AWS::StackName}
+            AWS_REGION=${AWS::Region}
+            WEFT_EGRESS_GATEWAY=gateway.${InternalDomain}:15000
+            WEFT_RUNTIME=firecracker
+            WEFT_MAX_SANDBOXES=${MaxSandboxesPerHost}
+            WEFT_SLOT_POOL=${SlotPoolCidr}
+            WEFT_DISABLE_SMT=${HostDisableSmt}
+            WEFT_HOST_LOG_GROUP=${HostLogGroup}
+            WEFT_STACK_ENV
+            chmod 0644 /etc/weft/stack.env
+            exec /usr/local/sbin/weft-host-bootstrap
+
+  # Spot first, with On-Demand base capacity. There is deliberately no
+  # UpdatePolicy: a new AMI or setting applies to hosts launched afterwards,
+  # and existing hosts (with running sandboxes) are replaced by an instance
+  # refresh the operator starts (see deploy/README.md).
+  HostAutoScalingGroup:
+    Type: AWS::AutoScaling::AutoScalingGroup
+    # Never launch hosts from an unverified release; delete hosts before Cleanup.
+    DependsOn: [ReleaseVerification, Cleanup]
+    Properties:
+      MinSize: !Ref HostMinSize
+      MaxSize: !Ref HostMaxSize
+      VPCZoneIdentifier: !If [CreateVpc, [!Ref PrivateSubnet1, !Ref PrivateSubnet2], !Ref PrivateSubnetIds]
+      CapacityRebalance: true
+      HealthCheckType: EC2
+      HealthCheckGracePeriod: 300
+      DefaultInstanceWarmup: 300
+      MetricsCollection:
+        - Granularity: 1Minute
+      MixedInstancesPolicy:
+        InstancesDistribution:
+          OnDemandAllocationStrategy: prioritized
+          OnDemandBaseCapacity: !Ref HostOnDemandBaseCapacity
+          OnDemandPercentageAboveBaseCapacity: !Ref HostOnDemandPercentageAboveBase
+          SpotAllocationStrategy: price-capacity-optimized
+        LaunchTemplate:
+          LaunchTemplateSpecification:
+            LaunchTemplateId: !Ref HostLaunchTemplate
+            Version: !GetAtt HostLaunchTemplate.LatestVersionNumber
+          Overrides:
+            - InstanceType: !Ref HostInstanceType
+            - !If [HasAlt1, { InstanceType: !Ref HostInstanceTypeAlt1 }, !Ref AWS::NoValue]
+            - !If [HasAlt2, { InstanceType: !Ref HostInstanceTypeAlt2 }, !Ref AWS::NoValue]
+      Tags:
+        - Key: Name
+          Value: !Sub "${AWS::StackName}-host"
+          PropagateAtLaunch: true
+
+  # Target tracking on the fleet-wide slot utilization the worker publishes.
+  # The metric namespace is the stack name, and the worker sets the StackName
+  # dimension to its namespace, so both identify this stack.
+  HostScalingPolicy:
+    Type: AWS::AutoScaling::ScalingPolicy
+    Properties:
+      AutoScalingGroupName: !Ref HostAutoScalingGroup
+      PolicyType: TargetTrackingScaling
+      TargetTrackingConfiguration:
+        TargetValue: !Ref HostTargetSlotUtilization
+        CustomizedMetricSpecification:
+          Namespace: !Ref AWS::StackName
+          MetricName: SlotUtilization
+          Dimensions:
+            - Name: StackName
+              Value: !Ref AWS::StackName
+          Statistic: Average
+          Unit: Percent
+
+Outputs:
+  ApiUrl:
+    Description: E2B_API_URL for clients
+    Value: !Sub "https://api.${DomainName}"
+  Domain:
+    Description: E2B_DOMAIN for clients
+    Value: !Ref DomainName
+  E2BEnvironment:
+    Description: Environment for E2B SDK clients in (or connected to) the VPC
+    Value: !Sub "E2B_API_URL=https://api.${DomainName} E2B_DOMAIN=${DomainName} E2B_API_KEY=<create one with weft-sandbox CLI>"
+  AdminKeySecretArn:
+    Description: Secrets Manager secret holding the bootstrap admin API key
+    Value: !Ref AdminKeySecret
+  EcrRepositoryUri:
+    Description: Push template images here
+    Value: !GetAtt TemplateRepository.RepositoryUri
+  EgressCaCertificateParameter:
+    Description: SSM parameter with the egress interception CA certificate (public)
+    Value: !GetAtt EgressCa.CertParameterName
+  ArtifactsBucketName:
+    Description: Template artifacts and paused-sandbox snapshots
+    Value: !Ref ArtifactsBucket
+  KmsKeyArn:
+    Description: Customer managed key encrypting the stack's data
+    Value: !GetAtt DataKey.Arn
+  LoadBalancerDnsName:
+    Description: Internal load balancer (api.<domain> and *.<domain> resolve here inside the VPC)
+    Value: !GetAtt LoadBalancer.DNSName
+  PublicLoadBalancerDnsName:
+    Condition: PublicLoadBalancer
+    Description: Public load balancer; point api.<domain> and *.<domain> here if the stack did not create public records
+    Value: !GetAtt PublicLoadBalancer.DNSName
+  PrivateHostedZoneId:
+    Description: Route 53 private hosted zone for the domain
+    Value: !Ref PrivateHostedZone
+  HostAutoScalingGroupName:
+    Description: Sandbox host fleet
+    Value: !Ref HostAutoScalingGroup
+  VpcId:
+    Description: VPC the install runs in
+    Value: !If [CreateVpc, !Ref Vpc, !Ref VpcId]
+  ReleaseVersion:
+    Description: Verified Weft Sandboxes release
+    Value: !GetAtt ReleaseVerification.Version
+  ReleaseManifestSha256:
+    Description: SHA-256 of the verified, signed release manifest
+    Value: !GetAtt ReleaseVerification.ManifestSha256

@@ -218,6 +218,14 @@ pub struct BuildStatus {
     /// Build log lines, oldest first; capped.
     pub logs: Vec<String>,
     pub envd_version: Option<String>,
+    /// Environment from the image config merged with the request's
+    /// `envVars`. The control plane stores it with the template and sends it
+    /// back in every start request.
+    #[serde(default)]
+    pub env_vars: BTreeMap<String, String>,
+    /// Working directory from the image config, if it set one.
+    #[serde(default)]
+    pub default_workdir: Option<String>,
     pub artifacts: Option<BuiltArtifacts>,
 }
 

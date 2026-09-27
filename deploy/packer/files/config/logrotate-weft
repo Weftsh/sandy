@@ -1,0 +1,10 @@
+/var/log/weft/*.log {
+    daily
+    maxsize 200M
+    rotate 7
+    missingok
+    notifempty
+    compress
+    delaycompress
+    copytruncate
+}

@@ -123,8 +123,9 @@ pub fn setup_plan(cfg: &NetConfig, slot: &Slot, link: &GuestLink) -> Vec<Cmd> {
 
     let mut plan = vec![
         ip(&["netns", "add", ns]),
-        in_ns(ns, "sysctl", &["-q", "-w", "net.ipv6.conf.all.disable_ipv6=1"]),
-        in_ns(ns, "sysctl", &["-q", "-w", "net.ipv6.conf.default.disable_ipv6=1"]),
+        // Fails only on kernels built without IPv6, where it is off anyway.
+        in_ns(ns, "sysctl", &["-q", "-w", "net.ipv6.conf.all.disable_ipv6=1"]).allow_failure(),
+        in_ns(ns, "sysctl", &["-q", "-w", "net.ipv6.conf.default.disable_ipv6=1"]).allow_failure(),
         in_ns(ns, "sysctl", &["-q", "-w", "net.ipv4.ip_forward=1"]),
         ip(&["link", "add", &slot.host_if, "type", "veth", "peer", "name", "veth0", "netns", ns]),
         ip(&["addr", "add", &host_cidr, "dev", &slot.host_if]),
@@ -150,8 +151,8 @@ pub fn setup_plan(cfg: &NetConfig, slot: &Slot, link: &GuestLink) -> Vec<Cmd> {
             let gw = GUEST_GATEWAY.to_string();
             plan.extend([
                 ip(&["netns", "add", g]),
-                in_ns(g, "sysctl", &["-q", "-w", "net.ipv6.conf.all.disable_ipv6=1"]),
-                in_ns(g, "sysctl", &["-q", "-w", "net.ipv6.conf.default.disable_ipv6=1"]),
+                in_ns(g, "sysctl", &["-q", "-w", "net.ipv6.conf.all.disable_ipv6=1"]).allow_failure(),
+                in_ns(g, "sysctl", &["-q", "-w", "net.ipv6.conf.default.disable_ipv6=1"]).allow_failure(),
                 ip(&["-n", ns, "link", "add", "tap0", "type", "veth", "peer", "name", "eth0", "netns", g]),
                 ip(&["-n", ns, "addr", "add", &gw_cidr, "dev", "tap0"]),
                 ip(&["-n", ns, "link", "set", "tap0", "up"]),

@@ -1,0 +1,10 @@
+# This directory is deliberately its own pnpm workspace root, separate from the
+# repository workspace: the Lambda bundles have their own lockfile so a release
+# can hash and rebuild them without touching the application packages.
+packages:
+  - "."
+
+# esbuild ships its platform binary as an optional dependency; its install
+# script is only a fallback and is not needed (or run) here.
+ignoredBuiltDependencies:
+  - esbuild

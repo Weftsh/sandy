@@ -253,7 +253,8 @@ impl Puller {
     }
 
     async fn get(&mut self, image: &ImageRef, url: &str, accept: Option<&str>) -> Result<reqwest::Response, OciError> {
-        for attempt in 0..2 {
+        let mut authenticated = false;
+        for attempt in 0..6 {
             let mut req = self.http.get(url);
             if let Some(a) = accept {
                 req = req.header("Accept", a);
@@ -264,7 +265,20 @@ impl Puller {
                 req = req.basic_auth(u, Some(p));
             }
             let resp = req.send().await?;
-            if resp.status() == reqwest::StatusCode::UNAUTHORIZED && attempt == 0 {
+            if resp.status() == reqwest::StatusCode::TOO_MANY_REQUESTS && attempt < 5 {
+                // Registries rate-limit anonymous pulls; honor Retry-After (capped).
+                let wait = resp
+                    .headers()
+                    .get("retry-after")
+                    .and_then(|v| v.to_str().ok())
+                    .and_then(|v| v.parse::<u64>().ok())
+                    .unwrap_or(2u64.pow(attempt + 1))
+                    .min(30);
+                tokio::time::sleep(std::time::Duration::from_secs(wait)).await;
+                continue;
+            }
+            if resp.status() == reqwest::StatusCode::UNAUTHORIZED && !authenticated {
+                authenticated = true;
                 let challenge = resp
                     .headers()
                     .get("www-authenticate")

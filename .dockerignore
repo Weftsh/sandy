@@ -1,0 +1,24 @@
+# Build contexts are the repository root. Keep them small and free of local
+# state and anything secret.
+.git
+.github
+.claude
+**/node_modules
+**/dist
+**/target
+**/coverage
+**/*.tsbuildinfo
+deploy
+guest
+docs
+
+# Secrets and local config never enter an image (mirrors .gitignore).
+**/.env
+**/.env.*
+**/*.pem
+**/*.key
+**/*.p12
+**/*.pfx
+**/license.key
+**/admin-key.txt
+.weft

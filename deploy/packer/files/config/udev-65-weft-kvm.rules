@@ -1,0 +1,4 @@
+# /dev/kvm for root and the kvm group only (the default is world-accessible).
+# Jailed Firecracker processes get their own device node inside their chroot,
+# owned by their per-VM UID, from the jailer.
+KERNEL=="kvm", GROUP="kvm", MODE="0660"
