@@ -45,6 +45,7 @@ reviews and approves every boundary change.
 | `guest` | Pinned builds of envd and the guest kernel | Apache-2.0 (build scripts) |
 | `templates/base` | The default `base` template image | Apache-2.0 |
 | `docs` | User and operator documentation | Apache-2.0 |
+| `site` | Marketing site (Tailwind CSS, published with GitHub Pages) | Apache-2.0 |
 
 ## Local development
 

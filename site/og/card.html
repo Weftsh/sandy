@@ -1,0 +1,21 @@
+<!doctype html>
+<!-- Source of og.png and social-preview.png; render with `node og/render.cjs`. -->
+<html><head><meta charset="utf-8"><style>
+  html,body{margin:0;height:100%}
+  body{font-family:ui-sans-serif,system-ui,-apple-system,"Segoe UI",Roboto,sans-serif;color:#fff;
+    background:radial-gradient(900px 520px at 85% -10%,rgba(124,108,255,.45),transparent),
+    radial-gradient(700px 420px at -5% 110%,rgba(217,70,239,.30),transparent),#070a17;display:flex;flex-direction:column;
+    justify-content:center;padding:0 88px;box-sizing:border-box}
+  .brand{display:flex;align-items:center;gap:18px;font-size:34px;font-weight:650;letter-spacing:-.01em}
+  .brand img{width:64px;height:64px}
+  h1{font-size:74px;line-height:1.04;letter-spacing:-.03em;margin:44px 0 0;font-weight:800;max-width:1000px}
+  h1 span{background:linear-gradient(90deg,#b9b0ff,#f0abfc);-webkit-background-clip:text;color:transparent}
+  p{font-size:30px;color:#cbd2e1;margin:30px 0 0;max-width:980px;line-height:1.35}
+  .tags{display:flex;gap:14px;margin-top:40px}
+  .tags div{font-size:22px;padding:10px 18px;border-radius:999px;background:rgba(255,255,255,.06);border:1px solid rgba(255,255,255,.14);color:#dde3f0}
+</style></head><body>
+  <div class="brand"><img src="../public/favicon.svg" alt="">Weft Sandboxes</div>
+  <h1>Secure sandboxes for AI agents, <span>in your own AWS account</span></h1>
+  <p>Firecracker microVMs in your VPC. Works with the E2B SDKs.</p>
+  <div class="tags"><div>Egress denied by default</div><div>Secrets never enter the sandbox</div><div>Source available</div></div>
+</body></html>

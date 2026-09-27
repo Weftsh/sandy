@@ -1,0 +1,16 @@
+{
+  "name": "@weftsh/site",
+  "version": "0.0.0",
+  "private": true,
+  "description": "Weft Sandboxes marketing site, published with GitHub Pages",
+  "license": "Apache-2.0",
+  "type": "module",
+  "scripts": {
+    "build": "node build.mjs",
+    "dev": "node build.mjs --watch"
+  },
+  "devDependencies": {
+    "@tailwindcss/cli": "4.3.3",
+    "tailwindcss": "4.3.3"
+  }
+}

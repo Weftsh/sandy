@@ -10,6 +10,11 @@ credentials your agents work with stay under your control.
 It works with the open-source E2B SDKs you may already use. Point them at your
 stack with three environment variables and your code runs unchanged.
 
+**[Website](https://weftsh.github.io/sandy/)** ·
+**[Try it locally](#try-it-locally)** ·
+**[Docs](docs/)** ·
+**[Security](docs/security.md)**
+
 [![CI](https://github.com/Weftsh/sandy/actions/workflows/ci.yml/badge.svg)](https://github.com/Weftsh/sandy/actions/workflows/ci.yml)
 [![License: FSL-1.1-ALv2](https://img.shields.io/badge/license-FSL--1.1--ALv2-blue)](LICENSE.md)
 

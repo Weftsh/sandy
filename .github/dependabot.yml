@@ -1,23 +1,83 @@
+# Dependabot keeps dependencies current. The rules below stop it from
+# proposing changes this repository makes on purpose, by hand:
+#
+# - Node.js major versions. Only LTS lines are used, and a new line is
+#   adopted deliberately (Docker images, Lambda runtime and @types/node
+#   together). Dependabot proposes minor, patch and digest updates only.
+# - The Rust image in Dockerfiles, which follows rust-toolchain.toml. Both
+#   are bumped together by hand; Dependabot proposes patch and digest
+#   updates only.
+# - Ubuntu releases for the base template (24.04 LTS until changed on purpose).
+#
+# Routine updates are grouped to keep pull requests few. Rust crates are
+# grouped for patch releases only: for 0.x crates a "minor" bump is a
+# breaking change and deserves its own pull request.
 version: 2
 updates:
   - package-ecosystem: cargo
     directory: /
     schedule: { interval: weekly }
     open-pull-requests-limit: 5
+    groups:
+      rust-patch:
+        update-types: [patch]
+
   - package-ecosystem: npm
     directory: /
     schedule: { interval: weekly }
     open-pull-requests-limit: 5
+    groups:
+      npm-minor-and-patch:
+        update-types: [minor, patch]
+    ignore:
+      - dependency-name: "@types/node"
+        update-types: ["version-update:semver-major"]
+
   - package-ecosystem: npm
     directory: /deploy/cloudformation/functions
     schedule: { interval: weekly }
     open-pull-requests-limit: 5
+    groups:
+      functions-minor-and-patch:
+        update-types: [minor, patch]
+    ignore:
+      # The Lambda runtime (nodejs22.x) is chosen in the stack template.
+      - dependency-name: "@types/node"
+        update-types: ["version-update:semver-major"]
+
+  - package-ecosystem: npm
+    directory: /site
+    schedule: { interval: monthly }
+    groups:
+      site:
+        patterns: ["*"]
+
   - package-ecosystem: github-actions
     directory: /
     schedule: { interval: weekly }
+    groups:
+      github-actions:
+        patterns: ["*"]
+
   - package-ecosystem: docker
     directory: /packages/control-plane
     schedule: { interval: weekly }
+    ignore:
+      # Node.js majors are adopted by hand, LTS lines only.
+      - dependency-name: node
+        update-types: ["version-update:semver-major"]
+
   - package-ecosystem: docker
     directory: /crates/egress-gateway
     schedule: { interval: weekly }
+    ignore:
+      # Follows rust-toolchain.toml; bump both together.
+      - dependency-name: rust
+        update-types: ["version-update:semver-major", "version-update:semver-minor"]
+
+  - package-ecosystem: docker
+    directory: /templates/base
+    schedule: { interval: weekly }
+    ignore:
+      - dependency-name: ubuntu
+        update-types: ["version-update:semver-major", "version-update:semver-minor"]

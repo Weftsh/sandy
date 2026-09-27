@@ -1,0 +1,10 @@
+# The site is its own pnpm workspace root, separate from the application
+# workspace, so its build tooling never enters the product's lockfile.
+packages:
+  - "."
+
+# Tailwind's CLI ships its native engine as optional platform packages; their
+# install scripts are not needed.
+ignoredBuiltDependencies:
+  - "@parcel/watcher"
+  - "@tailwindcss/oxide"

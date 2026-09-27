@@ -3,6 +3,7 @@
   "version": "0.1.0",
   "description": "Weft Sandboxes SDK helpers and admin CLI. Use the unmodified E2B SDK for sandboxes; use this package to configure it and to manage teams, keys, egress policies and templates.",
   "license": "Apache-2.0",
+  "homepage": "https://weftsh.github.io/sandy/",
   "type": "module",
   "main": "dist/index.js",
   "types": "dist/index.d.ts",

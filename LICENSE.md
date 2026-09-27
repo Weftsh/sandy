@@ -5,7 +5,7 @@ own `LICENSE` file, and each package manifest names its license.
 
 | Component | Paths | License |
 | --- | --- | --- |
-| SDK, CLI, install templates, AMI build, guest build scripts, docs, test suites | `packages/sdk`, `packages/compat-tests`, `deploy/`, `guest/`, `templates/`, `tests/`, `docs/`, `scripts/` | [Apache-2.0](LICENSES/Apache-2.0.txt) |
+| SDK, CLI, install templates, AMI build, guest build scripts, docs, test suites | `packages/sdk`, `packages/compat-tests`, `deploy/`, `guest/`, `templates/`, `tests/`, `docs/`, `scripts/`, `site/` | [Apache-2.0](LICENSES/Apache-2.0.txt) |
 | Control plane, edge proxy, licensing client, host agent, egress gateway, guest init | `packages/control-plane`, `packages/license`, `crates/` | [FSL-1.1-ALv2](LICENSES/FSL-1.1-ALv2.md) |
 
 The Functional Source License lets you read, audit, modify and run the

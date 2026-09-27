@@ -1,0 +1,46 @@
+@import "tailwindcss";
+@source "./";
+
+@theme {
+  --color-brand-50: oklch(0.97 0.02 280);
+  --color-brand-100: oklch(0.94 0.04 280);
+  --color-brand-200: oklch(0.88 0.08 280);
+  --color-brand-300: oklch(0.8 0.13 280);
+  --color-brand-400: oklch(0.7 0.18 280);
+  --color-brand-500: oklch(0.62 0.22 280);
+  --color-brand-600: oklch(0.55 0.24 280);
+  --color-brand-700: oklch(0.47 0.22 280);
+  --color-brand-900: oklch(0.3 0.12 280);
+}
+
+@layer base {
+  html {
+    scroll-behavior: smooth;
+    scroll-padding-top: 5rem;
+  }
+  ::selection {
+    background: var(--color-brand-500);
+    color: white;
+  }
+}
+
+@layer components {
+  .btn-primary {
+    @apply inline-flex items-center justify-center gap-2 rounded-xl bg-linear-to-r from-brand-500 to-fuchsia-500 px-5 py-3 text-sm font-semibold text-white shadow-lg shadow-brand-500/25 transition hover:brightness-110 focus-visible:outline-2 focus-visible:outline-offset-2 focus-visible:outline-brand-400;
+  }
+  .btn-secondary {
+    @apply inline-flex items-center justify-center gap-2 rounded-xl px-5 py-3 text-sm font-semibold ring-1 transition focus-visible:outline-2 focus-visible:outline-offset-2 focus-visible:outline-brand-400;
+  }
+  .eyebrow {
+    @apply text-sm font-semibold tracking-wide text-brand-600 uppercase;
+  }
+  .section-title {
+    @apply mt-2 text-3xl font-bold tracking-tight text-balance text-slate-900 sm:text-4xl;
+  }
+  .code-card {
+    @apply overflow-hidden rounded-2xl bg-slate-900 shadow-2xl ring-1 shadow-brand-900/20 ring-white/10;
+  }
+  .code-card pre {
+    @apply overflow-x-auto p-5 font-mono text-[13px] leading-6 text-slate-200;
+  }
+}

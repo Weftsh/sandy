@@ -112,6 +112,20 @@ The credential proxy tests need the development stack's test upstream and
 skip elsewhere. On a host, `sudo tests/escape/host_checks.sh` checks the
 jailer, the UIDs and the seccomp filters of running VMMs.
 
+## Website
+
+The marketing site in [site/](../site) is plain HTML styled with Tailwind CSS
+and published to GitHub Pages by
+[.github/workflows/pages.yml](../.github/workflows/pages.yml) on every push to
+`main` that changes it.
+
+```sh
+cd site && pnpm install
+pnpm run dev                     # rebuilds dist/ as you edit; serve it with any static server
+python3 -m http.server -d dist 8080
+node og/render.cjs               # regenerate the social images after editing og/card.html
+```
+
 ## Repository conventions
 
 - Source files start with a comment saying what they do and why.
