@@ -33,6 +33,14 @@ The payload contains:
 | `maxConcurrent` | Concurrent sandboxes covered; `null` means unlimited |
 | `mode` | `online` or `offline` |
 | `iat`, `exp` | Issued and expiry dates |
+| `trial` | Present and `true` on a trial key |
+
+A license covers the legal entity it is issued to: every AWS account that
+entity owns, so the keys Weft sells carry an empty `accounts` list. A 15-day
+trial key is marked `trial` and expires when the trial ends; the full key is
+emailed when the first payment clears. Release AMIs are public, like the rest
+of a release: the license is what entitles an organization to run the stack
+and to receive releases and security patches.
 
 Install or replace a key without updating the stack:
 
