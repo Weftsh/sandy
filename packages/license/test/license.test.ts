@@ -124,6 +124,35 @@ describe("license status", () => {
     expect(day31).toMatchObject({ state: "lapsed", releaseAccess: false });
   });
 
+  it("says a trial key is a trial, while it runs and after it ends", () => {
+    const p = payload({ trial: true, accounts: [], iat: "2026-12-27T00:00:00Z", exp: "2027-01-11T00:00:00Z" });
+    const running = evaluateLicense({ now, key: ok(p), accountId: "444455556666", concurrentSandboxes: 0 });
+    expect(running).toMatchObject({ state: "expiring", trial: true, accountCovered: true, releaseAccess: true });
+    expect(running.warnings).toEqual([
+      "The trial ends in 10 day(s). The full license key is emailed when the first payment clears; install it to replace this one.",
+    ]);
+
+    const ended = evaluateLicense({ now: new Date("2027-01-14T00:00:00Z"), key: ok(p), concurrentSandboxes: 0 });
+    expect(ended).toMatchObject({ state: "lapsed", trial: true, releaseAccess: true });
+    expect(ended.warnings).toHaveLength(1);
+    expect(ended.warnings[0]).toMatch(/^The trial ended 3 day\(s\) ago\./);
+    expect(ended.warnings[0]).toMatch(/install the full license key/);
+
+    const long = evaluateLicense({ now: new Date("2027-02-11T00:00:00Z"), key: ok(p), concurrentSandboxes: 0 });
+    expect(long).toMatchObject({ state: "lapsed", releaseAccess: false });
+    expect(long.warnings[0]).toMatch(/^The trial has ended\./);
+
+    for (const s of [running, ended, long]) expect(s.warnings.join(" ")).not.toMatch(/license expire|renewed/);
+  });
+
+  it("does not call a full key a trial", () => {
+    const p = payload({ exp: "2027-01-20T00:00:00Z" });
+    const status = evaluateLicense({ now, key: ok(p), concurrentSandboxes: 0 });
+    expect(status).toMatchObject({ state: "expiring", trial: false });
+    expect(status.warnings).toEqual(["The license expires in 19 day(s)."]);
+    expect(evaluateLicense({ now, concurrentSandboxes: 0 }).trial).toBe(false);
+  });
+
   it("warns only after seven days without a successful check", () => {
     const base = { now, key: ok(payload()), concurrentSandboxes: 0 };
     expect(evaluateLicense({ ...base, lastCheckAt: new Date("2026-12-26T00:00:00Z") }).checkOverdue).toBe(false);
