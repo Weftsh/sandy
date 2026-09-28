@@ -167,6 +167,15 @@ wait_http() { # url tries
   return 1
 }
 
+show_logs() {
+  local f
+  for f in "$STATE"/control-plane.log "$STATE"/egress-gateway.log "$STATE"/host-agent.log; do
+    [[ -f "$f" ]] || continue
+    printf '\n==> %s <==\n' "$f" >&2
+    tail -n 40 "$f" >&2
+  done
+}
+
 api() { # method path [body]
   curl -sf --noproxy '*' -X "$1" -H "X-API-Key: $WEFT_BOOTSTRAP_ADMIN_KEY" -H 'content-type: application/json' \
     ${3:+-d "$3"} "http://127.0.0.1:$API_PORT$2"
@@ -294,13 +303,16 @@ up() {
   echo $! >"$STATE/host-agent.pid"
 
   log "waiting for the base template ($BASE_IMAGE)"
-  local status=""
+  local status="" name
   for _ in $(seq 1 180); do
     status="$(api GET /weft/v1/templates | python3 -c 'import json,sys; t=[x for x in json.load(sys.stdin) if "base" in x["names"]]; print(t[0]["status"] if t else "")' 2>/dev/null || true)"
-    [[ "$status" == "ready" ]] && break
+    [[ "$status" == "ready" || "$status" == "failed" ]] && break
+    for name in control-plane egress-gateway host-agent; do
+      kill -0 "$(cat "$STATE/$name.pid")" 2>/dev/null || { show_logs; die "the $name exited; see $STATE/$name.log"; }
+    done
     sleep 2
   done
-  [[ "$status" == "ready" ]] || die "base template is '$status'; see $STATE/*.log"
+  [[ "$status" == "ready" ]] || { show_logs; die "base template is '${status:-missing}'; see $STATE/*.log"; }
 
   log "creating team and API key"
   local team key

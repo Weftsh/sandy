@@ -55,8 +55,9 @@ jobs:
           sudo apt-get update -q
           sudo apt-get install -y -q iproute2 iptables e2fsprogs \
             build-essential bc bison flex libelf-dev libssl-dev xz-utils
-      - name: Guest kernel cache
-        uses: actions/cache@55cc8345863c7cc4c66a329aec7e433d2d1c52a9 # v6.1.0
+      - name: Restore the guest kernel
+        id: kernel
+        uses: actions/cache/restore@55cc8345863c7cc4c66a329aec7e433d2d1c52a9 # v6.1.0
         with:
           path: |
             dist/guest/vmlinux
@@ -66,6 +67,15 @@ jobs:
         run: |
           rustup target add x86_64-unknown-linux-musl
           scripts/dev-stack.sh build --firecracker
+      # Saved right away, so a failure later in the job keeps the kernel.
+      - name: Save the guest kernel
+        if: steps.kernel.outputs.cache-hit != 'true'
+        uses: actions/cache/save@55cc8345863c7cc4c66a329aec7e433d2d1c52a9 # v6.1.0
+        with:
+          path: |
+            dist/guest/vmlinux
+            dist/guest/vmlinux.config
+          key: guest-kernel-${{ hashFiles('guest/kernel/**') }}
       - name: Start the stack (Firecracker)
         run: sudo -E env "PATH=$PATH" scripts/dev-stack.sh up --no-build --firecracker
       - name: E2B compatibility suite (unmodified SDKs)
@@ -92,13 +102,22 @@ jobs:
           EOF
       - name: Logs
         if: always()
-        run: sudo tail -n 300 .weft/dev/*.log || true
+        run: |
+          sudo sh -c 'tail -n 300 .weft/dev/*.log' || true
+          sudo find /var/lib/weft-dev -maxdepth 5 -printf '%M %u %s %p\n' 2>/dev/null | head -n 100 || true
+          sudo dmesg | tail -n 50 || true
       - name: Stop the stack
         if: always()
-        run: sudo scripts/dev-stack.sh down || true
+        run: |
+          sudo scripts/dev-stack.sh down || true
+          mkdir -p logs
+          sudo sh -c 'cp .weft/dev/*.log logs/' || true
+          sudo chown -R "$USER" logs
       - uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
         if: always()
         with:
           name: firecracker-reports
-          path: packages/compat-tests/reports/
+          path: |
+            packages/compat-tests/reports/
+            logs/
           retention-days: 14
