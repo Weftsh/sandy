@@ -8,7 +8,7 @@
  */
 import { badRequest, conflict, forbidden, notFound, unavailable } from "../errors.js";
 import { NAME_RE, newBuildId, newTemplateId } from "../ids.js";
-import type { ArtifactStore, PendingUpload, UploadedArtifact } from "../artifacts.js";
+import type { Artifacts, PendingUpload, UploadedArtifact } from "../artifacts.js";
 import type { HostRegistry } from "../hosts/registry.js";
 import { HostError } from "../hosts/client.js";
 import type { Principal } from "../auth/apikeys.js";
@@ -65,7 +65,7 @@ export class TemplateService {
   constructor(
     private store: Store,
     private hosts: HostRegistry,
-    private artifacts: ArtifactStore | undefined,
+    private artifacts: Artifacts | undefined,
     private registries: RegistryCredentials | undefined,
     private defaults: TemplateDefaults,
     private log: Logger,

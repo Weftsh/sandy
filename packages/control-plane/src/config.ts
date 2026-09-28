@@ -21,6 +21,8 @@ export interface Config {
   store: { kind: "memory" } | { kind: "dynamodb"; tablePrefix: string; endpoint?: string };
   /** S3 bucket for template artifacts and pause snapshots (Firecracker hosts). */
   artifactsBucket?: string;
+  /** Development only: keep artifacts in this directory, served by the API. */
+  devArtifactsDir?: string;
   internalAuth:
     | { kind: "dev-token"; token: string }
     | { kind: "aws-iam"; serverId: string; hostRoleName: string; gatewayRoleName: string; accountId?: string };
@@ -75,6 +77,11 @@ function fileOrValue(valueVar: string, fileVar: string): string | undefined {
 
 export function loadConfig(): Config {
   const devMode = env("WEFT_DEV_MODE") === "1";
+  const artifactsBucket = env("WEFT_ARTIFACTS_BUCKET");
+  const devArtifactsDir = env("WEFT_DEV_ARTIFACTS_DIR");
+  if (devArtifactsDir && !devMode) throw new Error("WEFT_DEV_ARTIFACTS_DIR requires WEFT_DEV_MODE=1");
+  if (devArtifactsDir && artifactsBucket) throw new Error("set WEFT_ARTIFACTS_BUCKET or WEFT_DEV_ARTIFACTS_DIR, not both");
+
   const roles = new Set(
     (env("WEFT_ROLES") ?? "api,edge,worker").split(",").map((r) => r.trim()) as Role[],
   );
@@ -158,7 +165,8 @@ export function loadConfig(): Config {
     domain,
     region: env("AWS_REGION") ?? env("AWS_DEFAULT_REGION") ?? "us-east-1",
     store,
-    artifactsBucket: env("WEFT_ARTIFACTS_BUCKET"),
+    artifactsBucket,
+    devArtifactsDir,
     internalAuth,
     bootstrapAdminKey: env("WEFT_BOOTSTRAP_ADMIN_KEY"),
     bootstrapTemplates,

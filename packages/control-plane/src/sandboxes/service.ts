@@ -14,7 +14,7 @@ import { randomBytes } from "node:crypto";
 import { ApiError, badRequest, conflict, internal, notFound, unavailable } from "../errors.js";
 import { newSandboxId, newToken, SANDBOX_ID_RE } from "../ids.js";
 import { DENY_ALL, sandboxPolicy, type EgressPolicy } from "../egress.js";
-import type { ArtifactStore, PendingUpload, UploadedArtifact } from "../artifacts.js";
+import type { Artifacts, PendingUpload, UploadedArtifact } from "../artifacts.js";
 import { HostError, type HostClient } from "../hosts/client.js";
 import type { HostRegistry } from "../hosts/registry.js";
 import type { TemplateService } from "../templates/service.js";
@@ -92,7 +92,7 @@ export class SandboxService {
     private store: Store,
     private hosts: HostRegistry,
     private templates: TemplateService,
-    private artifacts: ArtifactStore | undefined,
+    private artifacts: Artifacts | undefined,
     private usage: UsageRecorder,
     private opts: SandboxServiceOptions,
     private log: Logger,

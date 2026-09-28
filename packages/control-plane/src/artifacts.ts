@@ -50,7 +50,19 @@ export interface ArtifactRefs {
   vmstate: { url: string; sha256: string; size: number };
 }
 
-export class ArtifactStore {
+/**
+ * Where template and snapshot artifacts live: S3 ({@link ArtifactStore}), or
+ * a local directory in development (`LocalArtifactStore` in dev-artifacts.ts).
+ */
+export interface Artifacts {
+  /** Starts uploads of rootfs, memory and vmstate under `prefix`. */
+  beginUpload(prefix: string): Promise<PendingUpload>;
+  /** Download URLs a host can use without credentials. */
+  presign(objects: Record<ArtifactName, ArtifactObject>): Promise<ArtifactRefs>;
+  delete(objects: (ArtifactObject | undefined)[]): Promise<void>;
+}
+
+export class ArtifactStore implements Artifacts {
   constructor(
     private s3: S3Client,
     private bucket: string,

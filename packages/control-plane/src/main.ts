@@ -15,6 +15,7 @@ import { S3Client } from "@aws-sdk/client-s3";
 import { GetCallerIdentityCommand, STSClient } from "@aws-sdk/client-sts";
 
 import { ArtifactStore } from "./artifacts.js";
+import { LocalArtifactStore } from "./dev-artifacts.js";
 import { ADMIN_TEAM_ID, ApiKeys } from "./auth/apikeys.js";
 import { InternalAuth } from "./auth/internal.js";
 import { buildApi } from "./api/server.js";
@@ -38,6 +39,8 @@ export interface App {
   sandboxes: SandboxService;
   license: LicenseService;
   internalAuth: InternalAuth;
+  /** Development artifact store, whose routes the API server serves. */
+  devArtifacts?: LocalArtifactStore;
   log: Logger;
 }
 
@@ -64,7 +67,8 @@ export async function createApp(config: Config, store?: Store, log: Logger = jso
       : new DynamoStore(config.store.tablePrefix, new DynamoDBClient({ region: config.region, endpoint: config.store.endpoint })));
   const keys = new ApiKeys(db);
   const hosts = new HostRegistry(db);
-  const artifacts = config.artifactsBucket ? new ArtifactStore(new S3Client({ region: config.region }), config.artifactsBucket) : undefined;
+  const devArtifacts = config.devArtifactsDir ? new LocalArtifactStore(config.devArtifactsDir, apiBaseUrl(config)) : undefined;
+  const artifacts = config.artifactsBucket ? new ArtifactStore(new S3Client({ region: config.region }), config.artifactsBucket) : devArtifacts;
   const templates = new TemplateService(db, hosts, artifacts, ecrCredentials(config), {
     vcpus: config.defaults.vcpus,
     memoryMib: config.defaults.memoryMib,
@@ -125,7 +129,13 @@ export async function createApp(config: Config, store?: Store, log: Logger = jso
     if (config.bootstrapAdminKey) await keys.ensureAdminKey(config.bootstrapAdminKey);
     await license.init();
   }
-  return { config, store: db, keys, hosts, templates, sandboxes, license, internalAuth, log };
+  return { config, store: db, keys, hosts, templates, sandboxes, license, internalAuth, devArtifacts, log };
+}
+
+/** How hosts on this machine reach the API server (development only). */
+function apiBaseUrl(config: Config): string {
+  const host = config.apiListen.host === "0.0.0.0" || config.apiListen.host === "::" ? "127.0.0.1" : config.apiListen.host;
+  return `http://${host.includes(":") ? `[${host}]` : host}:${config.apiListen.port}`;
 }
 
 /** Periodic work. Runs in exactly one process (the worker service). */
@@ -194,6 +204,7 @@ async function main(): Promise<void> {
 
   if (config.roles.has("api")) {
     const api = buildApi({ ...app, auth: app.internalAuth, version: config.version });
+    app.devArtifacts?.routes(api);
     await api.listen({ host: config.apiListen.host, port: config.apiListen.port });
     void app.templates.resumeFollowing();
     closers.push(() => api.close());

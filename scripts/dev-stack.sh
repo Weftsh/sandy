@@ -217,6 +217,15 @@ up() {
 
   # Throwaway development secrets, regenerated on every start.
   export WEFT_DEV_MODE=1
+  # Firecracker templates and pause snapshots are artifacts that production
+  # keeps in S3; locally the control plane stores and serves them itself.
+  # Development state is in memory, so the last run's VM data is useless.
+  if [[ $firecracker -eq 1 ]]; then
+    rm -rf "$FC_DIR/artifacts" "$FC_DIR/host"
+    export WEFT_DEV_ARTIFACTS_DIR="$FC_DIR/artifacts"
+  else
+    unset WEFT_DEV_ARTIFACTS_DIR
+  fi
   WEFT_DEV_TOKEN="dev-$(openssl rand -hex 24)"
   WEFT_BOOTSTRAP_ADMIN_KEY="weft_sk_dev_$(openssl rand -hex 24)"
   export WEFT_DEV_TOKEN WEFT_BOOTSTRAP_ADMIN_KEY
