@@ -37,6 +37,8 @@ export interface LicenseStatus {
   mode: "online" | "offline" | "marketplace" | null;
   expiresAt: string | null;
   maxConcurrent: number | null;
+  /** The installed key is a trial key, which ends with the trial. */
+  trial: boolean;
   /** Whether the current AWS account is covered; null when unknown. */
   accountCovered: boolean | null;
   /**
@@ -82,6 +84,7 @@ export function evaluateLicense(input: EvaluateInput): LicenseStatus {
     mode: null,
     expiresAt: null,
     maxConcurrent: null,
+    trial: false,
     accountCovered: null,
     releaseAccess: false,
     checkOverdue: false,
@@ -122,6 +125,7 @@ export function evaluateLicense(input: EvaluateInput): LicenseStatus {
   status.mode = lic.mode;
   status.expiresAt = lic.exp;
   status.maxConcurrent = lic.maxConcurrent;
+  status.trial = lic.trial === true;
 
   if (lic.accounts.length > 0 && input.accountId) {
     status.accountCovered = lic.accounts.includes(input.accountId);
@@ -175,6 +179,16 @@ function applyExpiry(status: LicenseStatus, now: Date): void {
     const daysLapsed = Math.floor(-msLeft / DAY_MS);
     status.state = "lapsed";
     status.releaseAccess = daysLapsed < RELEASE_GRACE_DAYS;
+    if (status.trial) {
+      // A trial is not renewed: it becomes a full key when the first
+      // payment clears, and that key has to be installed over this one.
+      status.warnings.push(
+        status.releaseAccess
+          ? `The trial ended ${daysLapsed} day(s) ago. Sandboxes are unaffected. If you have subscribed, install the full license key Weft emailed you; new releases and security patches stop ${RELEASE_GRACE_DAYS - daysLapsed} day(s) from now without it.`
+          : "The trial has ended. Sandboxes are unaffected, but this account no longer receives new releases or security patches. Install a full license key to receive them.",
+      );
+      return;
+    }
     status.warnings.push(
       status.releaseAccess
         ? `The license expired ${daysLapsed} day(s) ago. Sandboxes are unaffected. New releases and security patches stop ${RELEASE_GRACE_DAYS - daysLapsed} day(s) from now unless it is renewed.`
@@ -186,7 +200,11 @@ function applyExpiry(status: LicenseStatus, now: Date): void {
   const daysLeft = Math.ceil(msLeft / DAY_MS);
   if (daysLeft <= EXPIRY_WARNING_DAYS) {
     status.state = "expiring";
-    status.warnings.push(`The license expires in ${daysLeft} day(s).`);
+    status.warnings.push(
+      status.trial
+        ? `The trial ends in ${daysLeft} day(s). The full license key is emailed when the first payment clears; install it to replace this one.`
+        : `The license expires in ${daysLeft} day(s).`,
+    );
   } else {
     status.state = "active";
   }

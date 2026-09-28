@@ -87,6 +87,7 @@ reports:
 | Field | Meaning |
 | --- | --- |
 | `state` | `unlicensed`, `invalid` (bad signature, or account not covered), `active`, `expiring` (within 30 days), `lapsed` |
+| `trial` | The installed key is a trial key. A trial reads `expiring` from its first day, and its warnings say when the trial ends and to install the full key |
 | `releaseAccess` | Whether the account is entitled to new releases and security patches. Stays true for 30 days after expiry |
 | `overCap` | More sandboxes running than `maxConcurrent`. Sandboxes keep launching |
 | `checkOverdue` | Online keys: no successful check for more than 7 days |

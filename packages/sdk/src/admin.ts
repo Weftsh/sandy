@@ -95,6 +95,8 @@ export interface LicenseStatus {
   entity: string | null;
   expiresAt: string | null;
   maxConcurrent: number | null;
+  /** The installed key is a trial key. Absent from stacks released before trials. */
+  trial?: boolean;
   releaseAccess: boolean;
   checkOverdue: boolean;
   overCap: boolean;
