@@ -416,8 +416,22 @@ jobs:
         with:
           version: "1.16.1"
 
-      # AMIs stay private in every Region. Weft's license service grants
-      # launch permission to licensed accounts; this workflow never shares.
+      # The AMIs are public in every Region (deploy/packer). An account-level
+      # "block public access for AMIs" setting refuses that wherever it is
+      # on, and it is on by default in newer accounts: check before an
+      # hour of building rather than fail at the end of it.
+      - name: AMIs can be made public in every Region
+        run: |
+          read -r -a regions <<<"$RELEASE_REGIONS"
+          for r in "${regions[@]}"; do
+            state="$(aws ec2 get-image-block-public-access-state --region "$r" \
+              --query ImageBlockPublicAccessState --output text)"
+            [[ "$state" == "unblocked" ]] || {
+              echo "::error::block public access for AMIs is '$state' in $r; turn it off with: aws ec2 disable-image-block-public-access --region $r"
+              exit 1
+            }
+          done
+
       - name: Build and copy the AMI
         env:
           GIT_COMMIT: ${{ github.sha }}
@@ -457,6 +471,18 @@ jobs:
           for r in "${regions[@]}"; do
             jq -e --arg r "$r" '.[$r] | test("^ami-[0-9a-f]+$")' amis.json >/dev/null ||
               { echo "::error::no AMI for $r"; exit 1; }
+          done
+
+      # A Region whose AMI is not public is a Region where no customer can
+      # launch hosts. Ask EC2, not the Packer template.
+      - name: Every AMI is public
+        run: |
+          read -r -a regions <<<"$RELEASE_REGIONS"
+          for r in "${regions[@]}"; do
+            ami="$(jq -r --arg r "$r" '.[$r]' amis.json)"
+            public="$(aws ec2 describe-images --region "$r" --image-ids "$ami" \
+              --query 'Images[0].Public' --output text)"
+            [[ "$public" == "True" ]] || { echo "::error::$ami in $r is not public"; exit 1; }
           done
 
       - uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1

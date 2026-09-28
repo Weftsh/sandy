@@ -27,8 +27,10 @@ You need:
 - **TLS**: either a Route 53 **public hosted zone** containing the domain (the
   stack creates and DNS-validates an ACM certificate for `api.<domain>` and
   `*.<domain>`), or an existing ACM certificate covering both names.
-- **A Weft license key** (or an AWS Marketplace subscription). Activating the
-  license shares the release's host AMIs with your account.
+- **A Weft license key** (or an AWS Marketplace subscription). A license
+  covers your organization: every AWS account it owns. Release AMIs are
+  public, so any account can launch the stack; the license is what entitles
+  you to run it and to receive releases and security patches.
 - A supported Region (one the release built an AMI for; the stack checks).
 
 Then open the release's **Launch Stack** link (on the GitHub release page), or:
@@ -354,9 +356,9 @@ bounded journald; the AMI defaults to IMDSv2. SELinux stays in the AL2023
 default (permissive); the jailer provides per-VM isolation (chroot,
 namespaces, seccomp, cgroups, one unprivileged UID per VM).
 
-The AMI is unencrypted so it can be shared; the launch template encrypts every
-volume at launch. AMIs are private: Weft's license service grants launch
-permission to licensed accounts, the release workflow never does.
+The AMI is unencrypted so it can be public; the launch template encrypts every
+volume at launch. AMIs are public in every release Region, like the rest of a
+release: a license is a term of use, not an image permission.
 
 Build locally:
 
@@ -460,7 +462,9 @@ pinned to full commit SHAs:
    attestation, SLSA provenance pushed to the registry.
 5. **Functions**: tests, Sigstore trusted root fetched through TUF, esbuild
    bundles zipped reproducibly, provenance.
-6. **AMI**: Packer build in the first Region and private copies to the others,
+6. **AMI**: Packer build in the first Region and public copies to the others
+   (after checking block public access for AMIs is off in every Region, and
+   then that every copy is public),
    with AWS access through OIDC (`vars.RELEASE_ROLE_ARN`), never static keys.
 7. **Publish**: render the template with the AMI map, image digests and
    version (`render_release_template.py`, then `cfn-lint` again); write
@@ -476,8 +480,10 @@ customer stacks read them), versioning and ideally S3 Object Lock; an IAM role
 trusting `token.actions.githubusercontent.com` for
 `repo:Weftsh/sandy:environment:release`, allowed to run the Packer build (EC2
 instances, images, snapshots, temporary security groups and key pairs in the
-build Region, `CopyImage` to the others) and to put objects in the release
-buckets; the `release` environment with required reviewers; and a tag ruleset
+build Region, `CopyImage` to the others, `ModifyImageAttribute` to make each
+copy public, and `GetImageBlockPublicAccessState` in every release Region) and to
+put objects in the release buckets; block public access for AMIs turned off
+(`aws ec2 disable-image-block-public-access`) in every release Region; the `release` environment with required reviewers; and a tag ruleset
 so only maintainers can create `v*` tags, since a tag's workflow run is what
 the stacks trust.
 

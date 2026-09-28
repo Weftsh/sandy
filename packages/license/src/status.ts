@@ -41,8 +41,9 @@ export interface LicenseStatus {
   accountCovered: boolean | null;
   /**
    * Whether this account should still receive new signed releases and
-   * security patches. Informational: Weft enforces it by sharing images only
-   * with covered accounts.
+   * security patches. Informational: releases and their AMIs are public, and
+   * release access is a term of the license, not something the stack or the
+   * images enforce.
    */
   releaseAccess: boolean;
   /** Online mode only: no successful daily check for {@link CHECK_OVERDUE_DAYS}. */

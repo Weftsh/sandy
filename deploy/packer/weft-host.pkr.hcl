@@ -49,11 +49,16 @@ source "amazon-ebs" "host" {
   ami_name        = local.ami_name
   ami_description = "Weft Sandboxes ${var.version} sandbox host (Amazon Linux 2023, Firecracker ${var.firecracker_version})"
   ami_regions     = var.ami_regions
-  # Private: no launch permissions are granted here.
+  # Public, in every Region it is copied to, like the rest of a release
+  # (the template, the container images, the guest artifacts). A license
+  # is a term of use, not an image permission: any account can launch a
+  # stack, and the license is what entitles it to run one and to receive
+  # releases and security patches. The release workflow checks each copy
+  # really is public before it publishes.
   ami_users  = []
-  ami_groups = []
-  # Unencrypted so the license service can share it; the stack's launch
-  # template encrypts every volume at launch.
+  ami_groups = ["all"]
+  # Unencrypted so it can be public; the stack's launch template encrypts
+  # every volume at launch.
   encrypt_boot          = false
   force_deregister      = var.force_deregister
   force_delete_snapshot = var.force_deregister
