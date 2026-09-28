@@ -25,8 +25,11 @@ def test_guest_sees_only_its_own_memory_and_processes(attacker):
 
 
 def test_serial_console_flood_does_not_break_the_sandbox(attacker):
-    attacker.commands.run("head -c 50000000 /dev/zero > /dev/ttyS0 || true", user="root", timeout=120)
-    assert attacker.commands.run("echo alive").stdout.strip() == "alive"
+    # Every byte written to the emulated UART is a VM exit, so the flood is
+    # bounded by time, not size: 20 seconds as fast as the guest can write.
+    # Firecracker drops console output beyond the VM's rate limit.
+    attacker.commands.run("timeout 20 sh -c 'cat /dev/zero > /dev/ttyS0' || true", user="root", timeout=90)
+    assert attacker.commands.run("echo alive", timeout=30).stdout.strip() == "alive"
 
 
 def test_filling_the_disk_stays_inside_the_sandbox(attacker):

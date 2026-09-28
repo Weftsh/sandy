@@ -132,6 +132,9 @@ jobs:
       - name: Escape-attempt suite (network)
         run: |
           set -a; . .weft/dev/e2b.env; set +a
+          # Sandboxes must not reach any port on the host's own address.
+          WEFT_ESCAPE_HOST_IP="$(hostname -I | awk '{print $1}')"
+          export WEFT_ESCAPE_HOST_IP
           .weft/compat-venv/bin/pytest -q tests/escape
       - name: Logs
         if: always()
