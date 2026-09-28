@@ -81,6 +81,29 @@ jobs:
           esac
           { echo "version=${version}"; echo "tag=${tag}"; echo "new=${new}"; } >>"$GITHUB_OUTPUT"
 
+      # The exchange npm performs before publishing: this workflow's GitHub
+      # OIDC token for a short-lived npm publish token. It succeeds only if
+      # npmjs.com trusts this repository and workflow, so trusted publishing
+      # is checked on every run on main, including runs with nothing to
+      # publish. The npm token is discarded unread.
+      - name: Check trusted publishing
+        if: env.PUBLISH == 'true'
+        run: |
+          id_token="$(curl -sS -f -H "Authorization: bearer $ACTIONS_ID_TOKEN_REQUEST_TOKEN" \
+            "${ACTIONS_ID_TOKEN_REQUEST_URL}&audience=npm:registry.npmjs.org" | jq -r .value)"
+          echo "::add-mask::$id_token"
+          status="$(curl -sS -o "$RUNNER_TEMP/exchange.json" -w '%{http_code}' -X POST \
+            -H "Authorization: Bearer $id_token" \
+            "https://registry.npmjs.org/-/npm/v1/oidc/token/exchange/package/@weftsh%2fsandbox")"
+          if [ "${status:0:1}" != 2 ]; then
+            echo "::error::npm trusted publishing is not set up for this workflow (HTTP ${status})"
+            jq -r '.error // .message // empty' "$RUNNER_TEMP/exchange.json" 2>/dev/null || true
+            rm -f "$RUNNER_TEMP/exchange.json"
+            exit 1
+          fi
+          rm -f "$RUNNER_TEMP/exchange.json"
+          echo "npm accepts this workflow as a trusted publisher of @weftsh/sandbox"
+
       - name: Publish
         if: env.PUBLISH == 'true' && steps.version.outputs.new == 'true'
         working-directory: packages/sdk
