@@ -16,6 +16,7 @@ stack with three environment variables and your code runs unchanged.
 **[Security](docs/security.md)**
 
 [![CI](https://github.com/Weftsh/sandy/actions/workflows/ci.yml/badge.svg)](https://github.com/Weftsh/sandy/actions/workflows/ci.yml)
+[![Firecracker E2E](https://github.com/Weftsh/sandy/actions/workflows/firecracker.yml/badge.svg)](https://github.com/Weftsh/sandy/actions/workflows/firecracker.yml)
 [![npm](https://img.shields.io/npm/v/@weftsh/sandbox)](https://www.npmjs.com/package/@weftsh/sandbox)
 [![License: FSL-1.1-ALv2](https://img.shields.io/badge/license-FSL--1.1--ALv2-blue)](LICENSE.md)
 
@@ -120,10 +121,10 @@ with demand. [docs/architecture.md](docs/architecture.md) has the details.
 
 ### Try it locally
 
-The development stack runs the whole service on one Linux machine. Sandboxes
-there are namespaced processes, not microVMs, so use it to evaluate the API,
-not to run untrusted code. You need root, Rust, Node.js 22 with pnpm, Go,
-Python 3.11 or later, `iproute2`, `iptables` and `openssl`.
+The development stack runs the whole service on one Linux machine. By
+default sandboxes there are namespaced processes, not microVMs, so use it to
+evaluate the API, not to run untrusted code. You need root, Rust, Node.js 22
+with pnpm, Go, Python 3.11 or later, `iproute2`, `iptables` and `openssl`.
 
 ```sh
 git clone https://github.com/Weftsh/sandy && cd sandy
@@ -137,6 +138,11 @@ sudo scripts/dev-stack.sh down                             # stops everything an
 
 The same environment file sets up the admin CLI, so
 `node packages/sdk/dist/cli.js teams list` works right away.
+
+On a machine with `/dev/kvm`, add `--firecracker` to the `build` and `up`
+commands to run every sandbox as a jailed Firecracker microVM with the
+production guest kernel, exactly as on an installed host
+([details](docs/development.md#firecracker-locally)).
 [docs/development.md](docs/development.md) covers the rest.
 
 ### Install in your AWS account
@@ -243,20 +249,26 @@ Version 0.1.0. The SDK and admin CLI are on
 [npm](https://www.npmjs.com/package/@weftsh/sandbox); the AWS install ships
 with the first release.
 
-- **Verified**, on every push to `main` in CI and by hand: the full E2B SDK
-  compatibility suite (Python and JavaScript, e2b 2.51.0) and the network
-  half of the escape-attempt suite. That half covers the metadata service,
-  host addresses, other sandboxes, direct internet, UDP, ICMP and DNS
-  tunnels. Both run against the real host agent, egress gateway and envd,
-  using the development runtime.
+- **Verified on real Firecracker microVMs on every change** (KVM on
+  GitHub's runners, with the production guest kernel, jailer, host agent,
+  egress gateway and envd): the full E2B SDK compatibility suite (Python and
+  JavaScript, e2b 2.51.0), the complete escape-attempt suite, and host
+  checks on the running VMMs.
+  - The escape suite covers the metadata service, the host's own address,
+    other sandboxes, direct internet, UDP, ICMP and DNS tunnels, envd
+    access tokens, the guest kernel and hypervisor boundary, memory and
+    process visibility, console floods and filling the disk.
+  - The host checks confirm every VMM is jailed, runs as its own
+    unprivileged UID with seccomp filtering, and has private network, mount
+    and PID namespaces.
+  - The compatibility suite and the network escape checks also run against
+    the development runtime in both routing modes.
 - **Unit and integration tested:** control plane (including against
-  DynamoDB Local), egress gateway, policy engine, licensing, host agent,
-  Firecracker runtime (against a simulated Firecracker), and the
-  CloudFormation custom resources. The stack template passes `cfn-lint` and
-  `checkov`.
-- **Not yet verified:** Firecracker microVMs on real KVM hardware, including
-  the VM-boundary half of the escape suite, and a full install in an AWS
-  account. Both are done before the first release.
+  DynamoDB Local), egress gateway, policy engine, licensing, host agent and
+  the CloudFormation custom resources. The stack template passes `cfn-lint`
+  and `checkov`.
+- **With the first release:** a full install in an AWS account, checked by
+  running the same suites against it.
 
 Known limitations are listed in
 [docs/compatibility.md](docs/compatibility.md#known-limitations).

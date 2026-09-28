@@ -140,9 +140,10 @@ Run it against your own stack as described in
 
 ## Known limitations
 
-- **Verification status.** The network half of the escape suite passes
-  against the development runtime. The Firecracker half has not yet run on
-  real KVM; see [Project status](../README.md#project-status).
+- **Not yet run in an AWS account.** The whole escape suite and the host
+  checks run on real Firecracker microVMs on every change. A full stack in
+  AWS is checked the same way with the first release; see
+  [Project status](../README.md#project-status).
 - **The development namespace runtime is not an isolation boundary.** It runs
   sandboxes as processes on the host kernel and refuses to start without
   `--insecure-namespace-runtime`. Stacks never use it.
