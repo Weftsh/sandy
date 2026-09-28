@@ -10,7 +10,7 @@ source .weft/dev/e2b.env                 # or point E2B_* at a real stack
 pip install -r packages/compat-tests/python/requirements.txt
 pytest tests/escape                      # network escapes (any runtime)
 WEFT_ESCAPE_RUNTIME=firecracker pytest tests/escape   # adds microVM boundary checks
-sudo tests/escape/host_checks.sh         # on a Firecracker host: jailer, UIDs, seccomp
+sudo tests/escape/host_checks.sh         # on a Firecracker host: jails, namespaces, UIDs, seccomp
 ```
 
 Tests marked `vm` need the Firecracker runtime; the development namespace

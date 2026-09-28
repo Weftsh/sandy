@@ -98,7 +98,7 @@ jobs:
           from e2b import Sandbox
           boxes = [Sandbox.create() for _ in range(2)]
           try:
-              subprocess.run(["sudo", "tests/escape/host_checks.sh"], check=True)
+              subprocess.run(["sudo", "env", "WEFT_JAIL_BASE=/var/lib/weft-dev/jail", "tests/escape/host_checks.sh"], check=True)
           finally:
               for box in boxes:
                   box.kill()

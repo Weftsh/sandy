@@ -112,7 +112,8 @@ packages/compat-tests/run.sh
 
 The credential proxy tests need the development stack's test upstream and
 skip elsewhere. On a host, `sudo tests/escape/host_checks.sh` checks the
-jailer, the UIDs and the seccomp filters of running VMMs.
+jails, namespaces, UIDs and seccomp filters of running VMMs (with the
+Firecracker development stack, set `WEFT_JAIL_BASE=/var/lib/weft-dev/jail`).
 
 ## Website
 
