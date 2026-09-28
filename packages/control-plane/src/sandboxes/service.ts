@@ -660,7 +660,9 @@ export class SandboxService {
     for (const id of reported.keys()) {
       if (known.has(id)) continue;
       const record = await this.store.getSandbox(id);
-      if (record && record.state === "starting") continue;
+      // Still being placed: a start, or a resume from S3, whose record does
+      // not name this host until the VM is up.
+      if (record && (record.state === "starting" || record.state === "resuming")) continue;
       this.log.warn("stopping orphaned sandbox", { sandboxId: id, hostId: host.hostId });
       await client.request("DELETE", `/v1/sandboxes/${id}`).catch(() => {});
     }

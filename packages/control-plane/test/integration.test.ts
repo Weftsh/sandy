@@ -378,6 +378,20 @@ describe("control plane with fake Firecracker hosts", () => {
     expect(host.sandboxes.has("orphan000000000000")).toBe(false);
   });
 
+  it("leaves a sandbox that is still resuming onto a host alone", async () => {
+    // A Firecracker resume from S3 restores the VM before the record names
+    // its host; a heartbeat in between reports a sandbox with no record there.
+    const created = (await call("POST", "/v2/sandboxes", { templateID: "base" })).body;
+    const host = hosts.find((h) => h.sandboxes.has(created.sandboxID))!;
+    const record = (await store.getSandbox(created.sandboxID))!;
+    await store.updateSandbox({ ...record, state: "resuming", hostId: null, version: record.version + 1 });
+    await heartbeat(host, [created.sandboxID]);
+    await new Promise((r) => setTimeout(r, 200));
+    expect(host.sandboxes.has(created.sandboxID)).toBe(true);
+    await store.updateSandbox({ ...record, version: record.version + 2 });
+    await call("DELETE", `/sandboxes/${created.sandboxID}`);
+  });
+
   it("drops a restarted host's sandboxes at once", async () => {
     const created = (await call("POST", "/v2/sandboxes", { templateID: "base" })).body;
     const host = hosts.find((h) => h.sandboxes.has(created.sandboxID))!;

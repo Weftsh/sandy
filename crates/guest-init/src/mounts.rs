@@ -34,13 +34,19 @@ fn mount_vm() -> io::Result<()> {
     let nosuid_nodev_noexec = MsFlags::MS_NOSUID | MsFlags::MS_NODEV | MsFlags::MS_NOEXEC;
     mount_fs("proc", "/proc", "proc", nosuid_nodev_noexec, None)?;
     mount_fs("sysfs", "/sys", "sysfs", nosuid_nodev_noexec, None)?;
-    mount_fs(
-        "devtmpfs",
-        "/dev",
-        "devtmpfs",
-        MsFlags::MS_NOSUID,
-        Some("mode=0755"),
-    )?;
+    // A kernel built with CONFIG_DEVTMPFS_MOUNT (Firecracker's guest
+    // configuration is) mounts devtmpfs on /dev before init runs, and
+    // mounting it there again fails with EBUSY.
+    let mounts = fs::read_to_string("/proc/self/mounts").unwrap_or_default();
+    if !is_mounted(&mounts, "/dev", "devtmpfs") {
+        mount_fs(
+            "devtmpfs",
+            "/dev",
+            "devtmpfs",
+            MsFlags::MS_NOSUID,
+            Some("mode=0755"),
+        )?;
+    }
     mount_common()?;
     mount_fs(
         "cgroup2",
@@ -138,6 +144,15 @@ fn mount_fs(
         .map_err(|err| io::Error::other(format!("mount {fstype} on {target}: {err}")))
 }
 
+/// Whether `mounts` (the format of /proc/self/mounts) has a `fstype`
+/// filesystem mounted on `target`.
+fn is_mounted(mounts: &str, target: &str, fstype: &str) -> bool {
+    mounts.lines().any(|line| {
+        let mut fields = line.split_whitespace().skip(1);
+        fields.next() == Some(target) && fields.next() == Some(fstype)
+    })
+}
+
 fn write_if_possible(path: &str, contents: &str) {
     // /etc/resolv.conf is often a dangling symlink into /run in container
     // images. Replace it with a regular file.
@@ -169,5 +184,21 @@ fn ensure_hosts(hostname: &str) {
     }
     if !out.is_empty() {
         write_if_possible("/etc/hosts", &(existing + &out));
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::is_mounted;
+
+    #[test]
+    fn finds_the_kernels_devtmpfs() {
+        let mounts = "/dev/root / ext4 rw,relatime 0 0\n\
+                      devtmpfs /dev devtmpfs rw,size=250000k,mode=755 0 0\n\
+                      proc /proc proc rw,nosuid,nodev,noexec,relatime 0 0\n";
+        assert!(is_mounted(mounts, "/dev", "devtmpfs"));
+        assert!(!is_mounted(mounts, "/dev/pts", "devpts"));
+        assert!(!is_mounted(mounts, "/dev", "tmpfs"));
+        assert!(!is_mounted("", "/dev", "devtmpfs"));
     }
 }
