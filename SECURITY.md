@@ -47,5 +47,5 @@ every account with an active license.
 
 ## Supported versions
 
-Security fixes land on the latest release. Before general availability,
-only the latest pre-release is supported.
+Security fixes land on the latest release, which is the only supported
+version.

@@ -16,11 +16,8 @@ stack with three environment variables and your code runs unchanged.
 **[Security](docs/security.md)**
 
 [![CI](https://github.com/Weftsh/sandy/actions/workflows/ci.yml/badge.svg)](https://github.com/Weftsh/sandy/actions/workflows/ci.yml)
+[![npm](https://img.shields.io/npm/v/@weftsh/sandbox)](https://www.npmjs.com/package/@weftsh/sandbox)
 [![License: FSL-1.1-ALv2](https://img.shields.io/badge/license-FSL--1.1--ALv2-blue)](LICENSE.md)
-
-> **Pre-release.** The first release has not been published yet. You can
-> [try it locally](#try-it-locally) today. See [Project status](#project-status)
-> for exactly what has been verified.
 
 ---
 
@@ -144,7 +141,10 @@ The same environment file sets up the admin CLI, so
 
 ### Install in your AWS account
 
-*Available with the first release.*
+Each release publishes a signed CloudFormation template with Launch Stack
+links for every supported Region. The first one is being prepared;
+[watch the repository](https://github.com/Weftsh/sandy/subscription) (Custom →
+Releases) to hear when it ships.
 
 1. **Launch the stack** from the release's Launch Stack link. Enter a domain
    (such as `sandbox.example.com`), its Route 53 hosted zone or an ACM
@@ -239,7 +239,9 @@ it ships. The SDK, CLI, deployment templates and tests are Apache-2.0 today.
 
 ## Project status
 
-Pre-release (0.1.0).
+Version 0.1.0. The SDK and admin CLI are on
+[npm](https://www.npmjs.com/package/@weftsh/sandbox); the AWS install ships
+with the first release.
 
 - **Verified**, on every push to `main` in CI and by hand: the full E2B SDK
   compatibility suite (Python and JavaScript, e2b 2.51.0) and the network
@@ -254,7 +256,7 @@ Pre-release (0.1.0).
   `checkov`.
 - **Not yet verified:** Firecracker microVMs on real KVM hardware, including
   the VM-boundary half of the escape suite, and a full install in an AWS
-  account. Both are planned before the first release.
+  account. Both are done before the first release.
 
 Known limitations are listed in
 [docs/compatibility.md](docs/compatibility.md#known-limitations).
