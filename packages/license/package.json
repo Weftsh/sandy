@@ -23,8 +23,8 @@
     "test": "vitest run"
   },
   "dependencies": {
-    "@aws-sdk/client-kms": "3.1141.0",
-    "@aws-sdk/client-license-manager": "3.1141.0"
+    "@aws-sdk/client-kms": "3.1144.0",
+    "@aws-sdk/client-license-manager": "3.1144.0"
   },
   "devDependencies": {
     "@types/node": "^22.20.4",
