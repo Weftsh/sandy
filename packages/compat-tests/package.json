@@ -13,7 +13,7 @@
   "devDependencies": {
     "@types/node": "^22.20.4",
     "e2b": "2.51.0",
-    "typescript": "~6.0.3",
+    "typescript": "~7.0.2",
     "vitest": "^4.1.11"
   }
 }
