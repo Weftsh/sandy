@@ -16,20 +16,20 @@
     "build": "node scripts/build.mjs"
   },
   "dependencies": {
-    "@aws-sdk/client-ec2": "3.1141.0",
-    "@aws-sdk/client-kms": "3.1141.0",
-    "@aws-sdk/client-lambda": "3.1141.0",
-    "@aws-sdk/client-s3": "3.1141.0",
-    "@aws-sdk/client-secrets-manager": "3.1141.0",
-    "@aws-sdk/client-ssm": "3.1141.0",
+    "@aws-sdk/client-ec2": "3.1147.0",
+    "@aws-sdk/client-kms": "3.1147.0",
+    "@aws-sdk/client-lambda": "3.1147.0",
+    "@aws-sdk/client-s3": "3.1147.0",
+    "@aws-sdk/client-secrets-manager": "3.1147.0",
+    "@aws-sdk/client-ssm": "3.1147.0",
     "@sigstore/bundle": "5.0.0",
     "@sigstore/protobuf-specs": "0.5.2",
     "@sigstore/verify": "4.1.2"
   },
   "devDependencies": {
     "@sigstore/tuf": "5.0.0",
-    "@types/aws-lambda": "8.10.163",
-    "@types/node": "^22.20.4",
+    "@types/aws-lambda": "8.10.164",
+    "@types/node": "^22.20.5",
     "esbuild": "0.28.2",
     "typescript": "~6.0.3",
     "vitest": "^4.1.11"
