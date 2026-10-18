@@ -11,8 +11,8 @@
     "test:python": "cd python && pytest -q"
   },
   "devDependencies": {
-    "@types/node": "^22.20.4",
-    "e2b": "2.51.0",
+    "@types/node": "^22.20.5",
+    "e2b": "2.56.0",
     "typescript": "~6.0.3",
     "vitest": "^4.1.11"
   }
